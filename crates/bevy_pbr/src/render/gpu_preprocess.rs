@@ -53,7 +53,7 @@ use bevy_render::{
     render_resource::{
         binding_types::{storage_buffer, storage_buffer_read_only, texture_2d, uniform_buffer},
         BindGroup, BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries,
-        BindingResource, Buffer, BufferBinding, BufferVec, CachedComputePipelineId,
+        BindingResource, Buffer, BufferBinding, BufferId, BufferVec, CachedComputePipelineId,
         ComputePassDescriptor, ComputePipelineDescriptor, DynamicBindGroupLayoutEntries,
         PartialBufferVec, PipelineCache, RawBufferVec, ShaderStages, ShaderType,
         SparseBufferUpdateBindGroups, SparseBufferUpdateJobs, SparseBufferUpdatePipelines,
@@ -429,6 +429,9 @@ pub struct ViewPhaseBinUnpackingBindGroups {
     indexed: Vec<ViewPhaseBinUnpackingBindGroup>,
     /// The bind groups for the non-indexed meshes, one for each batch set.
     non_indexed: Vec<ViewPhaseBinUnpackingBindGroup>,
+    /// Bind groups from the previous frame that this frame didn't use, kept
+    /// for one more frame in case the next frame needs them again.
+    spare: Vec<(BinUnpackingBindGroupKey, BindGroup)>,
 }
 
 /// The bind group for the `unpack_bins` shader for a single combination of
@@ -443,6 +446,58 @@ pub struct ViewPhaseBinUnpackingBindGroup {
     /// The number of mesh instances of the appropriate type (indexed or
     /// non-indexed) for this batch set.
     pub mesh_instance_count: u32,
+    /// The resources that [`Self::bind_group`] binds.
+    key: BinUnpackingBindGroupKey,
+}
+
+/// The resources that a bin unpacking bind group binds.
+///
+/// Batch sets keep their buffers from frame to frame, so in a mostly static
+/// scene the bind group for a batch set is usually one that we've already
+/// created. We use this key to find and reuse that bind group instead of
+/// creating a new one every frame.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct BinUnpackingBindGroupKey {
+    metadata_buffer: BufferId,
+    binned_mesh_instance_buffer: BufferId,
+    work_item_buffer: BufferId,
+    bin_metadata_buffer: BufferId,
+    bin_index_to_bin_metadata_index_buffer: BufferId,
+}
+
+/// Bind groups created on previous frames, keyed by the resources that they
+/// bind, along with whether each one was in use on the last frame (as opposed
+/// to being a spare).
+type ReusableBindGroups<K> = HashMap<K, (BindGroup, bool)>;
+
+/// Returns the bind groups to keep as spares for the next frame: those that
+/// were in use on the last frame but weren't reused on this one.
+///
+/// Some of the buffers that these bind groups bind alternate from frame to
+/// frame, so a bind group that wasn't needed this frame is often needed again
+/// on the next one.
+fn spare_bind_groups<K>(reusable_bind_groups: ReusableBindGroups<K>) -> Vec<(K, BindGroup)> {
+    reusable_bind_groups
+        .into_iter()
+        .filter_map(|(key, (bind_group, in_use))| in_use.then_some((key, bind_group)))
+        .collect()
+}
+
+impl ViewPhaseBinUnpackingBindGroups {
+    /// Converts these bind groups into a table that the next frame's bind
+    /// groups can be looked up in.
+    fn into_reusable(self) -> ReusableBindGroups<BinUnpackingBindGroupKey> {
+        self.indexed
+            .into_iter()
+            .chain(self.non_indexed)
+            .map(|bind_group| (bind_group.key, (bind_group.bind_group, true)))
+            .chain(
+                self.spare
+                    .into_iter()
+                    .map(|(key, bind_group)| (key, (bind_group, false))),
+            )
+            .collect()
+    }
 }
 
 /// A resource, part of the render world, that stores all the bind groups for
@@ -463,6 +518,9 @@ pub struct ViewPhaseUniformAllocationBindGroups {
     indexed: Vec<ViewPhaseUniformAllocationBindGroup>,
     /// The bind groups for the non-indexed meshes, one for each batch set.
     non_indexed: Vec<ViewPhaseUniformAllocationBindGroup>,
+    /// Bind groups from the previous frame that this frame didn't use, kept
+    /// for one more frame in case the next frame needs them again.
+    spare: Vec<(UniformAllocationBindGroupKey, BindGroup)>,
 }
 
 /// The bind group for the `allocate_uniforms` shader for a single combination
@@ -476,6 +534,37 @@ pub struct ViewPhaseUniformAllocationBindGroup {
     pub bind_group: BindGroup,
     /// The total number of bins in this batch set.
     pub bin_count: u32,
+    /// The resources that [`Self::bind_group`] binds.
+    key: UniformAllocationBindGroupKey,
+}
+
+/// The resources that a uniform allocation bind group binds.
+///
+/// As with [`BinUnpackingBindGroupKey`], we use this to reuse bind groups from
+/// frame to frame instead of creating new ones.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct UniformAllocationBindGroupKey {
+    metadata_buffer: BufferId,
+    bin_metadata_buffer: BufferId,
+    indirect_parameters_metadata_buffer: BufferId,
+    fan_buffer: BufferId,
+}
+
+impl ViewPhaseUniformAllocationBindGroups {
+    /// Converts these bind groups into a table that the next frame's bind
+    /// groups can be looked up in.
+    fn into_reusable(self) -> ReusableBindGroups<UniformAllocationBindGroupKey> {
+        self.indexed
+            .into_iter()
+            .chain(self.non_indexed)
+            .map(|bind_group| (bind_group.key, (bind_group.bind_group, true)))
+            .chain(
+                self.spare
+                    .into_iter()
+                    .map(|(key, bind_group)| (key, (bind_group, false))),
+            )
+            .collect()
+    }
 }
 
 /// Stops the `GpuPreprocessNode` attempting to generate the buffer for this view
@@ -677,7 +766,13 @@ pub fn allocate_uniforms(
             {
                 // Invoke the local scan (step 1).
                 compute_pass.set_pipeline(uniform_allocation_local_scan_pipeline);
-                compute_pass.set_bind_group(0, &uniform_allocation_bind_group.bind_group, &[]);
+                compute_pass.set_bind_group(
+                    0,
+                    &uniform_allocation_bind_group.bind_group,
+                    &[uniform_allocation_bind_group
+                        .metadata_index
+                        .uniform_offset()],
+                );
                 let local_scan_workgroup_count = uniform_allocation_bind_group
                     .bin_count
                     .div_ceil(UNIFORM_ALLOCATION_WORKGROUP_SIZE);
@@ -773,7 +868,11 @@ pub fn unpack_bins(
                     .iter()
                     .chain(phase_bin_unpacking_bind_groups.non_indexed.iter())
                 {
-                    compute_pass.set_bind_group(0, &bin_unpacking_bind_group.bind_group, &[]);
+                    compute_pass.set_bind_group(
+                        0,
+                        &bin_unpacking_bind_group.bind_group,
+                        &[bin_unpacking_bind_group.metadata_index.uniform_offset()],
+                    );
                     let workgroup_count = (bin_unpacking_bind_group.mesh_instance_count as usize)
                         .div_ceil(WORKGROUP_SIZE);
                     if workgroup_count > 0 {
@@ -1763,7 +1862,7 @@ fn bin_unpacking_bind_group_layout_entries() -> BindGroupLayoutEntries<5> {
         (
             // @group(0) @binding(0) var<uniform> bin_unpacking_metadata:
             // BinUnpackingMetadata;
-            uniform_buffer::<GpuBinUnpackingMetadata>(false),
+            uniform_buffer::<GpuBinUnpackingMetadata>(true),
             // @group(0) @binding(1) var<storage> binned_mesh_instances:
             // array<BinnedMeshInstance>;
             storage_buffer_read_only::<GpuRenderBinnedMeshInstance>(false),
@@ -1788,7 +1887,7 @@ fn uniform_allocation_bind_group_layout_entries() -> BindGroupLayoutEntries<4> {
         (
             // @group(0) @binding(0) var<uniform> allocate_uniforms_metadata:
             // AllocateUniformsMetadata;
-            uniform_buffer::<GpuUniformAllocationMetadata>(false),
+            uniform_buffer::<GpuUniformAllocationMetadata>(true),
             // @group(0) @binding(1) var<storage> bin_metadata: array<BinMetadata>;
             storage_buffer_read_only::<GpuBinMetadata>(false),
             // @group(0) @binding(2) var<storage, read_write>
@@ -3357,49 +3456,62 @@ fn create_bin_unpacking_bind_groups(
             } => non_indexed.buffer(),
         };
 
+        // Gather up the bind groups from the previous frame so that we can
+        // reuse the ones whose resources haven't changed.
+        let view_phase_key = SceneUnpackingBuffersKey {
+            phase: *phase_type_id,
+            view: *view_entity,
+        };
+        let mut reusable_bind_groups = bin_unpacking_bind_groups
+            .remove(&view_phase_key)
+            .map(ViewPhaseBinUnpackingBindGroups::into_reusable)
+            .unwrap_or_default();
+
         // Create the actual bind groups.
+        let indexed = match maybe_indexed_work_item_buffer {
+            Some(indexed_work_item_buffer) => view_phase_bin_unpacking_buffers
+                .indexed_unpacking_jobs
+                .iter()
+                .map(|job| {
+                    create_bin_unpacking_bind_group(
+                        render_device,
+                        preprocess_pipelines,
+                        pipeline_cache,
+                        job,
+                        bin_unpacking_metadata_buffer,
+                        indexed_work_item_buffer,
+                        true,
+                        &mut reusable_bind_groups,
+                    )
+                })
+                .collect(),
+            None => vec![],
+        };
+        let non_indexed = match maybe_non_indexed_work_item_buffer {
+            Some(non_indexed_work_item_buffer) => view_phase_bin_unpacking_buffers
+                .non_indexed_unpacking_jobs
+                .iter()
+                .map(|job| {
+                    create_bin_unpacking_bind_group(
+                        render_device,
+                        preprocess_pipelines,
+                        pipeline_cache,
+                        job,
+                        bin_unpacking_metadata_buffer,
+                        non_indexed_work_item_buffer,
+                        false,
+                        &mut reusable_bind_groups,
+                    )
+                })
+                .collect(),
+            None => vec![],
+        };
         bin_unpacking_bind_groups.insert(
-            SceneUnpackingBuffersKey {
-                phase: *phase_type_id,
-                view: *view_entity,
-            },
+            view_phase_key,
             ViewPhaseBinUnpackingBindGroups {
-                indexed: match maybe_indexed_work_item_buffer {
-                    Some(indexed_work_item_buffer) => view_phase_bin_unpacking_buffers
-                        .indexed_unpacking_jobs
-                        .iter()
-                        .map(|job| {
-                            create_bin_unpacking_bind_group(
-                                render_device,
-                                preprocess_pipelines,
-                                pipeline_cache,
-                                job,
-                                bin_unpacking_metadata_buffer,
-                                indexed_work_item_buffer,
-                                true,
-                            )
-                        })
-                        .collect(),
-                    None => vec![],
-                },
-                non_indexed: match maybe_non_indexed_work_item_buffer {
-                    Some(non_indexed_work_item_buffer) => view_phase_bin_unpacking_buffers
-                        .non_indexed_unpacking_jobs
-                        .iter()
-                        .map(|job| {
-                            create_bin_unpacking_bind_group(
-                                render_device,
-                                preprocess_pipelines,
-                                pipeline_cache,
-                                job,
-                                bin_unpacking_metadata_buffer,
-                                non_indexed_work_item_buffer,
-                                false,
-                            )
-                        })
-                        .collect(),
-                    None => vec![],
-                },
+                indexed,
+                non_indexed,
+                spare: spare_bind_groups(reusable_bind_groups),
             },
         );
     }
@@ -3415,7 +3527,24 @@ fn create_bin_unpacking_bind_group(
     bin_unpacking_metadata_buffer: &Buffer,
     work_item_buffer: &Buffer,
     indexed: bool,
+    reusable_bind_groups: &mut ReusableBindGroups<BinUnpackingBindGroupKey>,
 ) -> ViewPhaseBinUnpackingBindGroup {
+    let key = BinUnpackingBindGroupKey {
+        metadata_buffer: bin_unpacking_metadata_buffer.id(),
+        binned_mesh_instance_buffer: job.render_binned_mesh_instance_buffer.id(),
+        work_item_buffer: work_item_buffer.id(),
+        bin_metadata_buffer: job.bin_metadata_buffer.id(),
+        bin_index_to_bin_metadata_index_buffer: job.bin_index_to_bin_metadata_index_buffer.id(),
+    };
+    if let Some((bind_group, _)) = reusable_bind_groups.remove(&key) {
+        return ViewPhaseBinUnpackingBindGroup {
+            metadata_index: job.bin_unpacking_metadata_index,
+            bind_group,
+            mesh_instance_count: job.mesh_instance_count,
+            key,
+        };
+    }
+
     let bind_group = render_device.create_bind_group(
         if indexed {
             "bin unpacking indexed bind group"
@@ -3428,9 +3557,11 @@ fn create_bin_unpacking_bind_group(
             // @group(0) @binding(0) var<uniform>
             // bin_unpacking_metadata:
             // BinUnpackingMetadata;
+            // The offset of this job's metadata is supplied as a dynamic
+            // offset when the bind group is set.
             BindingResource::Buffer(BufferBinding {
                 buffer: bin_unpacking_metadata_buffer,
-                offset: job.bin_unpacking_metadata_index.uniform_offset() as u64,
+                offset: 0,
                 size: NonZeroU64::new(size_of::<GpuBinUnpackingMetadata>() as u64),
             }),
             // @group(0) @binding(1) var<storage>
@@ -3454,6 +3585,7 @@ fn create_bin_unpacking_bind_group(
         metadata_index: job.bin_unpacking_metadata_index,
         bind_group,
         mesh_instance_count: job.mesh_instance_count,
+        key,
     }
 }
 
@@ -3485,56 +3617,67 @@ fn create_uniform_allocation_bind_groups(
             continue;
         };
 
+        // Gather up the bind groups from the previous frame so that we can
+        // reuse the ones whose resources haven't changed.
+        let view_phase_key = SceneUnpackingBuffersKey {
+            phase: *phase_type_id,
+            view: *view_entity,
+        };
+        let mut reusable_bind_groups = uniform_allocation_bind_groups
+            .remove(&view_phase_key)
+            .map(ViewPhaseUniformAllocationBindGroups::into_reusable)
+            .unwrap_or_default();
+
         // Create the actual bind groups.
+        let indexed = match phase_indirect_parameters_buffers.indexed.metadata_buffer() {
+            None => vec![],
+            Some(indexed_indirect_parameters_metadata_buffer) => view_phase_bin_unpacking_buffers
+                .indexed_unpacking_jobs
+                .iter()
+                .map(|job| {
+                    create_uniform_allocation_bind_group(
+                        render_device,
+                        preprocess_pipelines,
+                        pipeline_cache,
+                        job,
+                        uniform_allocation_metadata_buffer,
+                        indexed_indirect_parameters_metadata_buffer,
+                        true,
+                        &mut reusable_bind_groups,
+                    )
+                })
+                .collect(),
+        };
+        let non_indexed = match phase_indirect_parameters_buffers
+            .non_indexed
+            .metadata_buffer()
+        {
+            None => vec![],
+            Some(non_indexed_indirect_parameters_metadata_buffer) => {
+                view_phase_bin_unpacking_buffers
+                    .non_indexed_unpacking_jobs
+                    .iter()
+                    .map(|job| {
+                        create_uniform_allocation_bind_group(
+                            render_device,
+                            preprocess_pipelines,
+                            pipeline_cache,
+                            job,
+                            uniform_allocation_metadata_buffer,
+                            non_indexed_indirect_parameters_metadata_buffer,
+                            false,
+                            &mut reusable_bind_groups,
+                        )
+                    })
+                    .collect()
+            }
+        };
         uniform_allocation_bind_groups.insert(
-            SceneUnpackingBuffersKey {
-                phase: *phase_type_id,
-                view: *view_entity,
-            },
+            view_phase_key,
             ViewPhaseUniformAllocationBindGroups {
-                indexed: match phase_indirect_parameters_buffers.indexed.metadata_buffer() {
-                    None => vec![],
-                    Some(indexed_indirect_parameters_metadata_buffer) => {
-                        view_phase_bin_unpacking_buffers
-                            .indexed_unpacking_jobs
-                            .iter()
-                            .map(|job| {
-                                create_uniform_allocation_bind_group(
-                                    render_device,
-                                    preprocess_pipelines,
-                                    pipeline_cache,
-                                    job,
-                                    uniform_allocation_metadata_buffer,
-                                    indexed_indirect_parameters_metadata_buffer,
-                                    true,
-                                )
-                            })
-                            .collect()
-                    }
-                },
-                non_indexed: match phase_indirect_parameters_buffers
-                    .non_indexed
-                    .metadata_buffer()
-                {
-                    None => vec![],
-                    Some(non_indexed_indirect_parameters_metadata_buffer) => {
-                        view_phase_bin_unpacking_buffers
-                            .non_indexed_unpacking_jobs
-                            .iter()
-                            .map(|job| {
-                                create_uniform_allocation_bind_group(
-                                    render_device,
-                                    preprocess_pipelines,
-                                    pipeline_cache,
-                                    job,
-                                    uniform_allocation_metadata_buffer,
-                                    non_indexed_indirect_parameters_metadata_buffer,
-                                    false,
-                                )
-                            })
-                            .collect()
-                    }
-                },
+                indexed,
+                non_indexed,
+                spare: spare_bind_groups(reusable_bind_groups),
             },
         );
     }
@@ -3550,7 +3693,23 @@ fn create_uniform_allocation_bind_group(
     uniform_allocation_metadata_buffer: &Buffer,
     indirect_parameters_metadata_buffer: &Buffer,
     indexed: bool,
+    reusable_bind_groups: &mut ReusableBindGroups<UniformAllocationBindGroupKey>,
 ) -> ViewPhaseUniformAllocationBindGroup {
+    let key = UniformAllocationBindGroupKey {
+        metadata_buffer: uniform_allocation_metadata_buffer.id(),
+        bin_metadata_buffer: job.bin_metadata_buffer.id(),
+        indirect_parameters_metadata_buffer: indirect_parameters_metadata_buffer.id(),
+        fan_buffer: job.fan_buffer.id(),
+    };
+    if let Some((bind_group, _)) = reusable_bind_groups.remove(&key) {
+        return ViewPhaseUniformAllocationBindGroup {
+            metadata_index: job.uniform_allocation_metadata_index,
+            bind_group,
+            bin_count: job.bin_count,
+            key,
+        };
+    }
+
     let bind_group = render_device.create_bind_group(
         if indexed {
             "uniform allocation indexed bind group"
@@ -3567,9 +3726,11 @@ fn create_uniform_allocation_bind_group(
         &BindGroupEntries::sequential((
             // @group(0) @binding(0) var<uniform> allocate_uniforms_metadata:
             // AllocateUniformsMetadata;
+            // The offset of this job's metadata is supplied as a dynamic
+            // offset when the bind group is set.
             BindingResource::Buffer(BufferBinding {
                 buffer: uniform_allocation_metadata_buffer,
-                offset: job.uniform_allocation_metadata_index.uniform_offset() as u64,
+                offset: 0,
                 size: NonZeroU64::new(size_of::<GpuUniformAllocationMetadata>() as u64),
             }),
             // @group(0) @binding(1) var<storage> bin_metadata:
@@ -3587,6 +3748,7 @@ fn create_uniform_allocation_bind_group(
         metadata_index: job.uniform_allocation_metadata_index,
         bind_group,
         bin_count: job.bin_count,
+        key,
     }
 }
 
