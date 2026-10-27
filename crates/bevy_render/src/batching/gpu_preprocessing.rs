@@ -2942,24 +2942,29 @@ pub fn write_binned_instance_buffers<BPI, GFBD>(
                 continue;
             };
 
-            // Write the various buffers to the GPU.
-
-            batch_set
-                .gpu_buffers
-                .render_binned_mesh_instance_buffer
-                .write_buffer(&render_device, &render_queue);
-            batch_set
-                .gpu_buffers
-                .bin_metadata_buffer
-                .write_buffer(&render_device, &render_queue);
-            batch_set
-                .gpu_buffers
-                .fan_buffer
-                .write_buffer(&render_device);
-            batch_set
-                .gpu_buffers
-                .bin_index_to_bin_metadata_index_buffer
-                .write_buffer(&render_device, &render_queue);
+            // Write the various buffers to the GPU, but only if they changed
+            // since we last wrote them. The shaders only read these buffers
+            // (except for the fan buffer, which is scratch space), so their
+            // GPU contents stay valid from frame to frame.
+            if batch_set.gpu_buffers.dirty {
+                batch_set
+                    .gpu_buffers
+                    .render_binned_mesh_instance_buffer
+                    .write_buffer(&render_device, &render_queue);
+                batch_set
+                    .gpu_buffers
+                    .bin_metadata_buffer
+                    .write_buffer(&render_device, &render_queue);
+                batch_set
+                    .gpu_buffers
+                    .fan_buffer
+                    .write_buffer(&render_device);
+                batch_set
+                    .gpu_buffers
+                    .bin_index_to_bin_metadata_index_buffer
+                    .write_buffer(&render_device, &render_queue);
+                batch_set.gpu_buffers.dirty = false;
+            }
 
             let (
                 Some(render_bin_entry_buffer),

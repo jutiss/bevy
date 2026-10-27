@@ -243,6 +243,14 @@ pub struct RenderMultidrawableBatchSetGpuBuffers {
     /// A temporary buffer used to store intermediate sums during the uniform
     /// allocation phase.
     pub fan_buffer: UninitBufferVec<u32>,
+
+    /// True if the CPU-side contents of these buffers have changed since they
+    /// were last uploaded to the GPU.
+    ///
+    /// Batch sets are retained from frame to frame, and in a mostly static
+    /// scene most of them don't change, so uploading only the ones that did
+    /// avoids redundant buffer writes every frame.
+    pub dirty: bool,
 }
 
 impl RenderMultidrawableBatchSetGpuBuffers {
@@ -263,6 +271,7 @@ impl RenderMultidrawableBatchSetGpuBuffers {
             bin_metadata_buffer,
             bin_index_to_bin_metadata_index_buffer,
             fan_buffer,
+            dirty: true,
         }
     }
 
@@ -551,6 +560,8 @@ where
         main_entity: MainEntity,
         input_uniform_index: InputUniformIndex,
     ) {
+        self.gpu_buffers.dirty = true;
+
         let bin_index;
         match self.bin_key_to_bin_index.entry(bin_key) {
             Entry::Occupied(occupied_entry) => {
@@ -602,6 +613,8 @@ where
     ///
     /// The given entity must be present in that bin.
     fn remove(&mut self, main_entity: MainEntity, bin_key: &BPI::BinKey) {
+        self.gpu_buffers.dirty = true;
+
         // Fetch the bin index.
         let bin_index = *self
             .bin_key_to_bin_index
