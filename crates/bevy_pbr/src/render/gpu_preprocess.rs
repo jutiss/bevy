@@ -1236,13 +1236,15 @@ pub fn late_gpu_preprocess(
     pass_span.end(&mut compute_pass);
 }
 
-/// A render graph system, run for each view, that builds the indirect
-/// parameters for multi-draw indirect calls for the early prepass.
+/// A render graph system, run for each view with a prepass, that builds the
+/// indirect parameters for multi-draw indirect calls for the early prepass.
 ///
 /// The early prepass is the prepass that draws objects that were visible in the
-/// previous frame.
+/// previous frame. A view without a prepass draws nothing in it; its indirect
+/// parameters are built by [`main_build_indirect_parameters`], and shadow views
+/// build their own in the shadow pass.
 pub fn early_prepass_build_indirect_parameters(
-    current_view: ViewQuery<&ExtractedView>,
+    current_view: ViewQuery<&ExtractedView, WithAnyPrepass>,
     preprocess_pipelines: Res<PreprocessPipelines>,
     build_indirect_params_bind_groups: Option<Res<BuildIndirectParametersBindGroups>>,
     pipeline_cache: Res<PipelineCache>,
@@ -1262,14 +1264,14 @@ pub fn early_prepass_build_indirect_parameters(
     );
 }
 
-/// A render graph system, run for each view, that builds the indirect
-/// parameters for multi-draw indirect calls for the late prepass.
+/// A render graph system, run for each view with a prepass, that builds the
+/// indirect parameters for multi-draw indirect calls for the late prepass.
 ///
 /// The late prepass is the prepass that draws objects that weren't visible in
 /// the previous frame but became visible this frame (disocclusions). It'll be
 /// skipped if occlusion culling is disabled.
 pub fn late_prepass_build_indirect_parameters(
-    current_view: ViewQuery<&ExtractedView>,
+    current_view: ViewQuery<&ExtractedView, WithAnyPrepass>,
     preprocess_pipelines: Res<PreprocessPipelines>,
     build_indirect_params_bind_groups: Option<Res<BuildIndirectParametersBindGroups>>,
     pipeline_cache: Res<PipelineCache>,
