@@ -888,7 +888,10 @@ where
         match self.dirty {
             BufferDirtyState::Clean | BufferDirtyState::NeedsUpload => {}
             BufferDirtyState::NeedsReserve => {
-                let capacity = self.buffer.len();
+                let capacity = match self.buffer.len() {
+                    0 => 0,
+                    len => len.next_power_of_two(),
+                };
                 self.buffer.reserve(capacity, render_device);
                 self.dirty = BufferDirtyState::NeedsUpload;
             }
@@ -2871,6 +2874,47 @@ impl RenderMaterialBindings {
 mod tests {
     use super::*;
     use crate::render_resource::{BindingNumber, BindlessIndexTableDescriptor};
+
+    #[test]
+    fn retained_material_buffers_grow_without_reallocating_each_batch() {
+        let (device, queue) = crate::test_utils::create_dummy_device();
+        let mut retained = RetainedRawBufferVec::<u32>::new(BufferUsages::STORAGE);
+        retained.dirty = BufferDirtyState::NeedsReserve;
+        retained.prepare(&device);
+        retained.write(&device, &queue);
+        assert!(retained.buffer.buffer().is_none());
+        assert_eq!(retained.buffer.len(), 0);
+
+        for value in [11, 22, 33] {
+            retained.buffer.push(value);
+        }
+        retained.dirty = BufferDirtyState::NeedsReserve;
+        retained.prepare(&device);
+        retained.write(&device, &queue);
+        let first = retained.buffer.buffer().unwrap().id();
+        assert_eq!(retained.buffer.buffer().unwrap().size(), 16);
+        assert_eq!(retained.buffer.values(), &[11, 22, 33]);
+
+        retained.buffer.push(44);
+        retained.dirty = BufferDirtyState::NeedsReserve;
+        retained.prepare(&device);
+        retained.write(&device, &queue);
+        assert_eq!(retained.buffer.buffer().unwrap().id(), first);
+        assert_eq!(retained.buffer.buffer().unwrap().size(), 16);
+        assert_eq!(retained.buffer.values(), &[11, 22, 33, 44]);
+
+        retained.buffer.push(55);
+        retained.dirty = BufferDirtyState::NeedsReserve;
+        retained.prepare(&device);
+        retained.write(&device, &queue);
+        let grown = retained.buffer.buffer().unwrap().id();
+        assert_ne!(grown, first);
+        assert_eq!(retained.buffer.buffer().unwrap().size(), 32);
+        assert_eq!(retained.buffer.values(), &[11, 22, 33, 44, 55]);
+        retained.prepare(&device);
+        retained.write(&device, &queue);
+        assert_eq!(retained.buffer.buffer().unwrap().id(), grown);
+    }
 
     #[test]
     fn get_bindless_index_table() {
