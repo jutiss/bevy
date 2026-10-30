@@ -66,6 +66,8 @@ impl RenderAsset for GpuImage {
         (render_device, render_queue, default_sampler): &mut SystemParamItem<Self::Param>,
         previous_asset: Option<&Self>,
     ) -> Result<Self, PrepareAssetError<Self::SourceAsset>> {
+        #[cfg(feature = "trace")]
+        let _span = bevy_log::info_span!("prepare image", size = ?image.texture_descriptor.size, format = ?image.texture_descriptor.format, bytes = image.data.as_ref().map_or(0, Vec::len)).entered();
         let had_data = image.data.is_some();
         let texture = if let Some(prev) = previous_asset
             && prev.texture_descriptor == image.texture_descriptor

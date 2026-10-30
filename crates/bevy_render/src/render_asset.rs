@@ -13,7 +13,7 @@ use bevy_ecs::{
 use bevy_log::{debug, error};
 use bevy_platform::collections::{HashMap, HashSet};
 use core::marker::PhantomData;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -380,13 +380,6 @@ pub struct PrepareNextFrameAssets<A: RenderAsset> {
     assets: Vec<(AssetId<A::SourceAsset>, A::SourceAsset)>,
 }
 
-impl<A: RenderAsset> PrepareNextFrameAssets<A> {
-    /// Whether all deferred assets have finished preparing.
-    pub fn is_empty(&self) -> bool {
-        self.assets.is_empty()
-    }
-}
-
 impl<A: RenderAsset> Default for PrepareNextFrameAssets<A> {
     fn default() -> Self {
         Self {
@@ -414,19 +407,12 @@ pub fn prepare_assets<A: RenderAsset>(
             continue;
         }
 
-        let write_bytes = if let Some(size) = A::byte_len(&extracted_asset) {
-            // we could check if available bytes > byte_len here, but we want to make some
-            // forward progress even if the asset is larger than the max bytes per frame.
-            // this way we always write at least one (sized) asset per frame.
-            // in future we could also consider partial asset uploads.
-            if bpf.exhausted() {
-                prepare_next_frame.assets.push((id, extracted_asset));
-                continue;
-            }
-            size
-        } else {
-            0
-        };
+        let size = A::byte_len(&extracted_asset);
+        if !bpf.try_start(size) {
+            prepare_next_frame.assets.push((id, extracted_asset));
+            continue;
+        }
+        let write_bytes = size.unwrap_or(0);
 
         let previous_asset = render_assets.get(id);
         match A::prepare_asset(extracted_asset, id, &mut param, previous_asset) {
@@ -436,6 +422,7 @@ pub fn prepare_assets<A: RenderAsset>(
                 wrote_asset_count += 1;
             }
             Err(PrepareAssetError::RetryNextUpdate(extracted_asset)) => {
+                bpf.defer();
                 prepare_next_frame.assets.push((id, extracted_asset));
             }
             Err(PrepareAssetError::AsBindGroupError(e)) => {
@@ -458,15 +445,12 @@ pub fn prepare_assets<A: RenderAsset>(
         // even if the new asset is not yet ready or we are out of bytes to write.
         let previous_asset = render_assets.remove(id);
 
-        let write_bytes = if let Some(size) = A::byte_len(&extracted_asset) {
-            if bpf.exhausted() {
-                prepare_next_frame.assets.push((id, extracted_asset));
-                continue;
-            }
-            size
-        } else {
-            0
-        };
+        let size = A::byte_len(&extracted_asset);
+        if !bpf.try_start(size) {
+            prepare_next_frame.assets.push((id, extracted_asset));
+            continue;
+        }
+        let write_bytes = size.unwrap_or(0);
 
         match A::prepare_asset(extracted_asset, id, &mut param, previous_asset.as_ref()) {
             Ok(prepared_asset) => {
@@ -475,6 +459,7 @@ pub fn prepare_assets<A: RenderAsset>(
                 wrote_asset_count += 1;
             }
             Err(PrepareAssetError::RetryNextUpdate(extracted_asset)) => {
+                bpf.defer();
                 prepare_next_frame.assets.push((id, extracted_asset));
             }
             Err(PrepareAssetError::AsBindGroupError(e)) => {
@@ -507,6 +492,7 @@ pub fn extract_render_asset_bytes_per_frame(
     mut bpf_limiter: ResMut<RenderAssetBytesPerFrameLimiter>,
 ) {
     bpf_limiter.max_bytes = bpf.max_bytes;
+    bpf_limiter.max_assets = bpf.max_assets;
 }
 
 /// A resource that defines the amount of data allowed to be transferred from CPU to GPU
@@ -515,6 +501,8 @@ pub fn extract_render_asset_bytes_per_frame(
 #[derive(Resource, Default)]
 pub struct RenderAssetBytesPerFrame {
     pub max_bytes: Option<usize>,
+    /// Maximum preparation attempts across all asset types, including retries and unsized assets.
+    pub max_assets: Option<usize>,
 }
 
 impl RenderAssetBytesPerFrame {
@@ -528,6 +516,7 @@ impl RenderAssetBytesPerFrame {
     pub fn new(max_bytes: usize) -> Self {
         Self {
             max_bytes: Some(max_bytes),
+            max_assets: None,
         }
     }
 }
@@ -541,15 +530,41 @@ pub struct RenderAssetBytesPerFrameLimiter {
     pub max_bytes: Option<usize>,
     /// Bytes written this frame.
     pub bytes_written: AtomicUsize,
+    /// Maximum preparation attempts, copied during extraction.
+    pub max_assets: Option<usize>,
+    attempts: AtomicUsize,
+    pending: AtomicBool,
 }
 
 impl RenderAssetBytesPerFrameLimiter {
     /// Reset the available bytes. Called once per frame during extraction by [`crate::RenderPlugin`].
     pub fn reset(&mut self) {
-        if self.max_bytes.is_none() {
-            return;
-        }
         self.bytes_written.store(0, Ordering::Relaxed);
+        self.attempts.store(0, Ordering::Relaxed);
+        self.pending.store(false, Ordering::Relaxed);
+    }
+
+    /// Whether preparation deferred any asset this frame, either for its budget or dependencies.
+    pub fn has_pending(&self) -> bool {
+        self.pending.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn defer(&self) {
+        self.pending.store(true, Ordering::Relaxed);
+    }
+
+    pub(crate) fn try_start(&self, size: Option<usize>) -> bool {
+        if size.is_some() && self.exhausted() {
+            self.defer();
+            return false;
+        }
+        if let Some(max) = self.max_assets
+            && self.attempts.fetch_add(1, Ordering::Relaxed) >= max
+        {
+            self.defer();
+            return false;
+        }
+        true
     }
 
     /// Check how many bytes are available for writing.
@@ -585,5 +600,148 @@ impl RenderAssetBytesPerFrameLimiter {
         } else {
             false
         }
+    }
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+    use bevy_app::Update;
+    use bevy_reflect::TypePath;
+
+    #[derive(Asset, TypePath, Clone)]
+    struct Source {
+        value: usize,
+        retry: bool,
+    }
+    struct Prepared(usize);
+    impl RenderAsset for Prepared {
+        type SourceAsset = Source;
+
+        type Param = ();
+        fn prepare_asset(
+            source: Source,
+            _: AssetId<Source>,
+            _: &mut SystemParamItem<Self::Param>,
+            _: Option<&Self>,
+        ) -> Result<Self, PrepareAssetError<Source>> {
+            if source.retry {
+                Err(PrepareAssetError::RetryNextUpdate(source))
+            } else {
+                Ok(Self(source.value))
+            }
+        }
+    }
+
+    #[test]
+    fn preparation_limit_is_shared_with_unsized_assets_and_resets_each_frame() {
+        let mut limit = RenderAssetBytesPerFrameLimiter {
+            max_bytes: Some(4),
+            max_assets: Some(2),
+            ..Default::default()
+        };
+        assert!(limit.try_start(Some(8)), "one oversized asset progresses");
+        limit.write_bytes(8);
+        assert!(!limit.try_start(Some(1)), "byte budget exhausted");
+        assert!(
+            limit.try_start(None),
+            "unsized assets use the attempt budget alone"
+        );
+        assert!(!limit.try_start(None), "attempt budget exhausted");
+        assert!(limit.has_pending());
+        limit.reset();
+        assert!(!limit.has_pending());
+        assert!(limit.try_start(None));
+        limit.max_assets = None;
+        for _ in 0..5 {
+            assert!(limit.try_start(None));
+        }
+        limit.max_assets = Some(0);
+        assert!(!limit.try_start(None));
+    }
+
+    #[test]
+    fn preparation_budget_bounds_unsized_retries_and_discards_replaced_or_removed_work() {
+        let mut app = App::new();
+        app.init_resource::<ExtractedAssets<Prepared>>()
+            .init_resource::<PrepareNextFrameAssets<Prepared>>()
+            .init_resource::<RenderAssets<Prepared>>()
+            .insert_resource(RenderAssetBytesPerFrameLimiter {
+                max_assets: Some(2),
+                ..Default::default()
+            })
+            .add_systems(
+                Update,
+                (
+                    reset_render_asset_bytes_per_frame,
+                    prepare_assets::<Prepared>,
+                )
+                    .chain(),
+            );
+        let mut sources = Assets::<Source>::default();
+        let handles: Vec<_> = (0..3)
+            .map(|value| {
+                sources.add(Source {
+                    value,
+                    retry: value == 0,
+                })
+            })
+            .collect();
+        app.world_mut()
+            .resource_mut::<ExtractedAssets<Prepared>>()
+            .extracted = handles
+            .iter()
+            .map(|h| (h.id(), sources.get(h).unwrap().clone()))
+            .collect();
+        app.update();
+        assert_eq!(
+            app.world()
+                .resource::<RenderAssets<Prepared>>()
+                .get(handles[1].id())
+                .unwrap()
+                .0,
+            1
+        );
+        assert_eq!(
+            app.world()
+                .resource::<PrepareNextFrameAssets<Prepared>>()
+                .assets
+                .len(),
+            2
+        );
+        assert!(app
+            .world()
+            .resource::<RenderAssetBytesPerFrameLimiter>()
+            .has_pending());
+        {
+            let mut extracted = app.world_mut().resource_mut::<ExtractedAssets<Prepared>>();
+            extracted.removed.insert(handles[0].id());
+            extracted.added.insert(handles[2].id());
+            extracted.extracted.push((
+                handles[2].id(),
+                Source {
+                    value: 9,
+                    retry: false,
+                },
+            ));
+        }
+        app.update();
+        assert_eq!(
+            app.world()
+                .resource::<RenderAssets<Prepared>>()
+                .get(handles[2].id())
+                .unwrap()
+                .0,
+            9
+        );
+        assert!(app
+            .world()
+            .resource::<PrepareNextFrameAssets<Prepared>>()
+            .assets
+            .is_empty());
+        assert!(!app
+            .world()
+            .resource::<RenderAssetBytesPerFrameLimiter>()
+            .has_pending());
     }
 }

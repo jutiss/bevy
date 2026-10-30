@@ -25,7 +25,7 @@ use bevy_shader::{
 use bevy_tasks::Task;
 use bevy_utils::default;
 use core::{future::Future, mem};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Mutex, PoisonError, TryLockError};
 use wgpu::{PipelineCompilationOptions, VertexBufferLayout as RawVertexBufferLayout};
 
 /// A pipeline defining the data layout and shader logic for a specific GPU task.
@@ -864,17 +864,26 @@ impl PipelineCache {
     /// [`RenderSystems::Render`]: crate::RenderSystems::Render
     pub fn process_queue(&mut self) {
         // Extraction must not wait for a worker compiling a shader with this cache locked.
-        if !self.pending_shaders.is_empty()
-            && let Ok(mut shaders) = self.shader_cache.try_lock()
         {
-            for (id, shader) in self.pending_shaders.drain() {
-                let invalidated = match shader {
-                    Some(shader) => shaders.set_shader(id, shader),
-                    None => shaders.remove(id),
-                };
-                for id in invalidated {
-                    self.pipelines[id].state = CachedPipelineState::Queued;
-                    self.waiting_pipelines.insert(id);
+            let shaders = if self.pending_shaders.is_empty() {
+                None
+            } else {
+                match self.shader_cache.try_lock() {
+                    Ok(shaders) => Some(shaders),
+                    Err(TryLockError::Poisoned(error)) => Some(error.into_inner()),
+                    Err(TryLockError::WouldBlock) => None,
+                }
+            };
+            if let Some(mut shaders) = shaders {
+                for (id, shader) in self.pending_shaders.drain() {
+                    let invalidated = match shader {
+                        Some(shader) => shaders.set_shader(id, shader),
+                        None => shaders.remove(id),
+                    };
+                    for id in invalidated {
+                        self.pipelines[id].state = CachedPipelineState::Queued;
+                        self.waiting_pipelines.insert(id);
+                    }
                 }
             }
         }
