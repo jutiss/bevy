@@ -66,6 +66,10 @@ impl RenderAsset for GpuImage {
         image.data.as_ref().map(Vec::len)
     }
 
+    fn retain_previous() -> bool {
+        true
+    }
+
     fn cancel_preparation(
         id: AssetId<Image>,
         (_, _, _, _, uploads): &mut SystemParamItem<Self::Param>,
@@ -538,6 +542,59 @@ mod upload_tests {
             .world()
             .resource::<RenderAssetBytesPerFrameLimiter>()
             .has_pending());
+    }
+
+    #[test]
+    fn a_large_replacement_keeps_the_complete_old_texture_until_its_last_chunk() {
+        let mut app = app();
+        let mut source = Assets::<Image>::default();
+        let handle = source.add(image(6));
+        app.world_mut()
+            .resource_mut::<ExtractedAssets<GpuImage>>()
+            .extracted
+            .push((handle.id(), image(6)));
+        for _ in 0..3 {
+            app.update();
+        }
+        let first = app
+            .world()
+            .resource::<RenderAssets<GpuImage>>()
+            .get(handle.id())
+            .unwrap()
+            .texture
+            .id();
+        app.world_mut()
+            .resource_mut::<ExtractedAssets<GpuImage>>()
+            .extracted
+            .push((handle.id(), image(8)));
+        for _ in 0..3 {
+            app.update();
+            let gpu = app
+                .world()
+                .resource::<RenderAssets<GpuImage>>()
+                .get(handle.id())
+                .unwrap();
+            assert_eq!(
+                (gpu.texture.id(), gpu.texture_descriptor.size.height),
+                (first, 6)
+            );
+            assert!(app
+                .world()
+                .resource::<PrepareNextFrameAssets<GpuImage>>()
+                .contains(handle.id()));
+        }
+        app.update();
+        let gpu = app
+            .world()
+            .resource::<RenderAssets<GpuImage>>()
+            .get(handle.id())
+            .unwrap();
+        assert_ne!(gpu.texture.id(), first);
+        assert_eq!(gpu.texture_descriptor.size.height, 8);
+        assert!(!app
+            .world()
+            .resource::<PrepareNextFrameAssets<GpuImage>>()
+            .contains(handle.id()));
     }
 
     #[test]

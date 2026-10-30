@@ -387,7 +387,7 @@ pub fn prepare_erased_assets<A: ErasedRenderAsset>(
         }
 
         let size = A::byte_len(&extracted_asset);
-        if !bpf.try_start(size) {
+        if render_assets.get(id).is_none() && !bpf.try_start(size) {
             prepare_next_frame.assets.push((id, extracted_asset));
             continue;
         }
@@ -421,13 +421,10 @@ pub fn prepare_erased_assets<A: ErasedRenderAsset>(
     }
 
     for (id, extracted_asset) in extracted_assets.extracted.drain(..) {
-        // we remove previous here to ensure that if we are updating the asset then
-        // any users will not see the old asset after a new asset is extracted,
-        // even if the new asset is not yet ready or we are out of bytes to write.
-        render_assets.remove(id);
+        let updating = render_assets.remove(id).is_some();
 
         let size = A::byte_len(&extracted_asset);
-        if !bpf.try_start(size) {
+        if !updating && !bpf.try_start(size) {
             prepare_next_frame.assets.push((id, extracted_asset));
             continue;
         }
@@ -492,6 +489,68 @@ mod budget_tests {
                 Ok(source.value)
             }
         }
+    }
+
+    #[test]
+    fn existing_updates_stay_in_frame_when_the_initial_preparation_budget_is_empty() {
+        let mut app = App::new();
+        let mut limit = RenderAssetBytesPerFrameLimiter::default();
+        limit.max_assets = Some(0);
+        app.init_resource::<ExtractedAssets<Prepared>>()
+            .init_resource::<PrepareNextFrameAssets<Prepared>>()
+            .init_resource::<ErasedRenderAssets<usize>>()
+            .insert_resource(limit)
+            .add_systems(Update, prepare_erased_assets::<Prepared>);
+        let mut sources = Assets::<Source>::default();
+        let old = sources.add(Source {
+            value: 1,
+            retry: false,
+        });
+        let fresh = sources.add(Source {
+            value: 2,
+            retry: false,
+        });
+        app.world_mut()
+            .resource_mut::<ErasedRenderAssets<usize>>()
+            .insert(old.id(), 1);
+        app.world_mut()
+            .resource_mut::<ExtractedAssets<Prepared>>()
+            .extracted = vec![
+            (
+                old.id(),
+                Source {
+                    value: 9,
+                    retry: false,
+                },
+            ),
+            (
+                fresh.id(),
+                Source {
+                    value: 2,
+                    retry: false,
+                },
+            ),
+        ];
+        app.update();
+        assert_eq!(
+            *app.world()
+                .resource::<ErasedRenderAssets<usize>>()
+                .get(old.id())
+                .unwrap(),
+            9
+        );
+        assert!(app
+            .world()
+            .resource::<ErasedRenderAssets<usize>>()
+            .get(fresh.id())
+            .is_none());
+        assert_eq!(
+            app.world()
+                .resource::<PrepareNextFrameAssets<Prepared>>()
+                .assets
+                .len(),
+            1
+        );
     }
 
     #[test]

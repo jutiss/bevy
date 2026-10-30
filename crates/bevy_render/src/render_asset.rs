@@ -92,6 +92,11 @@ pub trait RenderAsset: Send + Sync + 'static + Sized {
     ) {
     }
 
+    /// Keep the last complete GPU representation while a replacement is preparing.
+    fn retain_previous() -> bool {
+        false
+    }
+
     /// Discard preparation retained for a source that was replaced or removed.
     fn cancel_preparation(
         _source_asset: AssetId<Self::SourceAsset>,
@@ -387,6 +392,13 @@ pub struct PrepareNextFrameAssets<A: RenderAsset> {
     assets: Vec<(AssetId<A::SourceAsset>, A::SourceAsset)>,
 }
 
+impl<A: RenderAsset> PrepareNextFrameAssets<A> {
+    /// Whether a source still has a replacement or first representation preparing.
+    pub fn contains(&self, id: AssetId<A::SourceAsset>) -> bool {
+        self.assets.iter().any(|(pending, _)| *pending == id)
+    }
+}
+
 impl<A: RenderAsset> Default for PrepareNextFrameAssets<A> {
     fn default() -> Self {
         Self {
@@ -418,7 +430,7 @@ pub fn prepare_assets<A: RenderAsset>(
         }
 
         let size = A::byte_len(&extracted_asset);
-        if !bpf.try_start(size) {
+        if render_assets.get(id).is_none() && !bpf.try_start(size) {
             prepare_next_frame.assets.push((id, extracted_asset));
             continue;
         }
@@ -450,13 +462,11 @@ pub fn prepare_assets<A: RenderAsset>(
     }
 
     for (id, extracted_asset) in extracted_assets.extracted.drain(..) {
-        // we remove previous here to ensure that if we are updating the asset then
-        // any users will not see the old asset after a new asset is extracted,
-        // even if the new asset is not yet ready or we are out of bytes to write.
+        // Assets may opt to retain their last complete representation until replacement succeeds.
         let previous_asset = render_assets.remove(id);
 
         let size = A::byte_len(&extracted_asset);
-        if !bpf.try_start(size) {
+        if previous_asset.is_none() && !bpf.try_start(size) {
             prepare_next_frame.assets.push((id, extracted_asset));
             continue;
         }
@@ -471,6 +481,11 @@ pub fn prepare_assets<A: RenderAsset>(
             Err(PrepareAssetError::RetryNextUpdate(extracted_asset)) => {
                 bpf.defer();
                 prepare_next_frame.assets.push((id, extracted_asset));
+                if A::retain_previous()
+                    && let Some(previous) = previous_asset
+                {
+                    render_assets.insert(id, previous);
+                }
             }
             Err(PrepareAssetError::AsBindGroupError(e)) => {
                 error!(
@@ -511,7 +526,7 @@ pub fn extract_render_asset_bytes_per_frame(
 #[derive(Resource, Default)]
 pub struct RenderAssetBytesPerFrame {
     pub max_bytes: Option<usize>,
-    /// Maximum preparation attempts across all asset types, including retries and unsized assets.
+    /// Maximum initial preparation attempts, including retries and unsized assets; existing updates stay in-frame.
     pub max_assets: Option<usize>,
 }
 
@@ -674,6 +689,69 @@ mod budget_tests {
         }
         limit.max_assets = Some(0);
         assert!(!limit.try_start(None));
+    }
+
+    #[test]
+    fn existing_updates_stay_in_frame_when_the_initial_preparation_budget_is_empty() {
+        let mut app = App::new();
+        let mut limit = RenderAssetBytesPerFrameLimiter::default();
+        limit.max_assets = Some(0);
+        app.init_resource::<ExtractedAssets<Prepared>>()
+            .init_resource::<PrepareNextFrameAssets<Prepared>>()
+            .init_resource::<RenderAssets<Prepared>>()
+            .insert_resource(limit)
+            .add_systems(Update, prepare_assets::<Prepared>);
+        let mut sources = Assets::<Source>::default();
+        let old = sources.add(Source {
+            value: 1,
+            retry: false,
+        });
+        let fresh = sources.add(Source {
+            value: 2,
+            retry: false,
+        });
+        app.world_mut()
+            .resource_mut::<RenderAssets<Prepared>>()
+            .insert(old.id(), Prepared(1));
+        app.world_mut()
+            .resource_mut::<ExtractedAssets<Prepared>>()
+            .extracted = vec![
+            (
+                old.id(),
+                Source {
+                    value: 9,
+                    retry: false,
+                },
+            ),
+            (
+                fresh.id(),
+                Source {
+                    value: 2,
+                    retry: false,
+                },
+            ),
+        ];
+        app.update();
+        assert_eq!(
+            app.world()
+                .resource::<RenderAssets<Prepared>>()
+                .get(old.id())
+                .unwrap()
+                .0,
+            9
+        );
+        assert!(app
+            .world()
+            .resource::<RenderAssets<Prepared>>()
+            .get(fresh.id())
+            .is_none());
+        assert_eq!(
+            app.world()
+                .resource::<PrepareNextFrameAssets<Prepared>>()
+                .assets
+                .len(),
+            1
+        );
     }
 
     #[test]
