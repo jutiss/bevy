@@ -49,7 +49,7 @@ fn clear_view_upscaling_pipelines(
 
 fn prepare_view_upscaling_pipelines(
     mut commands: Commands,
-    mut pipeline_cache: ResMut<PipelineCache>,
+    pipeline_cache: Res<PipelineCache>,
     mut pipelines: ResMut<SpecializedRenderPipelines<BlitPipeline>>,
     blit_pipeline: Res<BlitPipeline>,
     view_targets: Query<(
@@ -98,10 +98,6 @@ fn prepare_view_upscaling_pipelines(
 
         if maybe_pipeline.is_none_or(|ViewUpscalingPipeline(_, cached_key)| *cached_key != key) {
             let pipeline = pipelines.specialize(&pipeline_cache, &blit_pipeline, key);
-
-            // Ensure the pipeline is loaded before continuing the frame to prevent frames without
-            // any GPU work submitted
-            pipeline_cache.block_on_render_pipeline(pipeline);
 
             commands
                 .entity(entity)

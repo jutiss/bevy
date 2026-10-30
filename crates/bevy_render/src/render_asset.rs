@@ -380,6 +380,13 @@ pub struct PrepareNextFrameAssets<A: RenderAsset> {
     assets: Vec<(AssetId<A::SourceAsset>, A::SourceAsset)>,
 }
 
+impl<A: RenderAsset> PrepareNextFrameAssets<A> {
+    /// Whether all deferred assets have finished preparing.
+    pub fn is_empty(&self) -> bool {
+        self.assets.is_empty()
+    }
+}
+
 impl<A: RenderAsset> Default for PrepareNextFrameAssets<A> {
     fn default() -> Self {
         Self {

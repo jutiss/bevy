@@ -226,10 +226,11 @@ pub struct PipelineCache {
     new_pipelines: Mutex<Vec<CachedPipeline>>,
     global_shader_defs: Vec<ShaderDefVal>,
     /// If `true`, disables asynchronous pipeline compilation.
-    /// This has no effect on macOS, wasm, or without the `multi_threaded` feature.
+    /// This has no effect on wasm or without the `multi_threaded` feature.
     pub(crate) synchronous_pipeline_compilation: bool,
     /// If `true`, the shader cache needs to be repopulated from the main world's `Assets<Shader>`.
     needs_shader_reload: bool,
+    pending_shaders: HashMap<AssetId<Shader>, Option<Shader>>,
 }
 
 impl PipelineCache {
@@ -284,6 +285,7 @@ impl PipelineCache {
             global_shader_defs,
             synchronous_pipeline_compilation,
             needs_shader_reload: true,
+            pending_shaders: HashMap::default(),
         }
     }
 
@@ -861,6 +863,21 @@ impl PipelineCache {
     ///
     /// [`RenderSystems::Render`]: crate::RenderSystems::Render
     pub fn process_queue(&mut self) {
+        // Extraction must not wait for a worker compiling a shader with this cache locked.
+        if !self.pending_shaders.is_empty()
+            && let Ok(mut shaders) = self.shader_cache.try_lock()
+        {
+            for (id, shader) in self.pending_shaders.drain() {
+                let invalidated = match shader {
+                    Some(shader) => shaders.set_shader(id, shader),
+                    None => shaders.remove(id),
+                };
+                for id in invalidated {
+                    self.pipelines[id].state = CachedPipelineState::Queued;
+                    self.waiting_pipelines.insert(id);
+                }
+            }
+        }
         let mut waiting_pipelines = mem::take(&mut self.waiting_pipelines);
         let mut pipelines = mem::take(&mut self.pipelines);
 
@@ -956,7 +973,7 @@ impl PipelineCache {
                 shader
                     .shader_defs
                     .splice(0..0, cache.global_shader_defs.iter().cloned());
-                cache.set_shader(id, shader);
+                cache.pending_shaders.insert(id, Some(shader));
             }
             // Drain events so we don't double-process shaders we just loaded.
             for _ in events.read() {}
@@ -969,7 +986,6 @@ impl PipelineCache {
                 reason = "LoadedWithDependencies is marked as a TODO, so it's likely this will no longer lint soon."
             )]
             match event {
-                // PERF: Instead of blocking waiting for the shader cache lock, try again next frame if the lock is currently held
                 AssetEvent::Added { id } | AssetEvent::Modified { id } => {
                     if let Some(shader) = shaders.get(*id) {
                         let mut shader = shader.clone();
@@ -977,10 +993,12 @@ impl PipelineCache {
                             .shader_defs
                             .splice(0..0, cache.global_shader_defs.iter().cloned());
 
-                        cache.set_shader(*id, shader);
+                        cache.pending_shaders.insert(*id, Some(shader));
                     }
                 }
-                AssetEvent::Removed { id } => cache.remove_shader(*id),
+                AssetEvent::Removed { id } => {
+                    cache.pending_shaders.insert(*id, None);
+                }
                 AssetEvent::Unused { .. } => {}
                 AssetEvent::LoadedWithDependencies { .. } => {
                     // TODO: handle this
@@ -1055,11 +1073,7 @@ fn pipeline_error_context(cached_pipeline: &CachedPipeline) -> String {
     }
 }
 
-#[cfg(all(
-    not(target_arch = "wasm32"),
-    not(target_os = "macos"),
-    feature = "multi_threaded"
-))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "multi_threaded"))]
 fn create_pipeline_task(
     task: impl Future<Output = Result<Pipeline, ShaderCacheError>> + Send + 'static,
     sync: bool,
@@ -1074,11 +1088,7 @@ fn create_pipeline_task(
     }
 }
 
-#[cfg(any(
-    target_arch = "wasm32",
-    target_os = "macos",
-    not(feature = "multi_threaded")
-))]
+#[cfg(any(target_arch = "wasm32", not(feature = "multi_threaded")))]
 fn create_pipeline_task(
     task: impl Future<Output = Result<Pipeline, ShaderCacheError>> + Send + 'static,
     _sync: bool,
@@ -1086,5 +1096,62 @@ fn create_pipeline_task(
     match bevy_tasks::block_on(task) {
         Ok(pipeline) => CachedPipelineState::Ok(pipeline),
         Err(err) => CachedPipelineState::Err(err),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_utils::create_dummy_device;
+
+    #[test]
+    fn extracted_shader_updates_wait_without_blocking_and_keep_the_latest_change() {
+        let (device, _) = create_dummy_device();
+        let mut cache = PipelineCache::new(device, true);
+        let shader = Handle::<Shader>::default();
+        let source = || Shader::from_wgsl("@compute @workgroup_size(1) fn main() {}", "test.wgsl");
+        cache.pending_shaders.insert(shader.id(), Some(source()));
+        let shared = cache.shader_cache.clone();
+        let locked = shared.lock().unwrap();
+        cache.process_queue();
+        assert_eq!(cache.pending_shaders.len(), 1);
+        drop(locked);
+        cache.process_queue();
+        assert!(cache.pending_shaders.is_empty());
+        let id = cache.queue_compute_pipeline(ComputePipelineDescriptor {
+            shader: shader.clone(),
+            layout: vec![BindGroupLayoutDescriptor::new("test", &[])],
+            ..default()
+        });
+        cache.process_queue();
+        assert!(cache.get_compute_pipeline(id).is_some());
+        cache.pending_shaders.insert(shader.id(), Some(source()));
+        cache.pending_shaders.insert(shader.id(), None);
+        cache.process_queue();
+        assert!(matches!(
+            cache.get_compute_pipeline_state(id),
+            CachedPipelineState::Err(ShaderCacheError::ShaderNotLoaded(_))
+        ));
+        cache.pending_shaders.insert(shader.id(), None);
+        cache.pending_shaders.insert(shader.id(), Some(source()));
+        cache.process_queue();
+        cache.process_queue();
+        assert!(cache.get_compute_pipeline(id).is_some());
+    }
+
+    #[cfg(all(not(target_arch = "wasm32"), feature = "multi_threaded"))]
+    #[test]
+    fn native_async_compilation_returns_a_task_and_sync_compilation_finishes() {
+        bevy_tasks::AsyncComputeTaskPool::get_or_init(bevy_tasks::TaskPool::new);
+        let pending = create_pipeline_task(core::future::pending(), false);
+        assert!(matches!(pending, CachedPipelineState::Creating(_)));
+        let finished = create_pipeline_task(
+            async { Err(ShaderCacheError::ShaderNotLoaded(AssetId::default())) },
+            true,
+        );
+        assert!(matches!(
+            finished,
+            CachedPipelineState::Err(ShaderCacheError::ShaderNotLoaded(_))
+        ));
     }
 }
