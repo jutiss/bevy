@@ -38,7 +38,7 @@ use bevy_reflect::Reflect;
 use bevy_render::batching::gpu_preprocessing::BatchedInstanceBuffers;
 use bevy_render::camera::{DirtySpecializationSystems, DirtySpecializations, PendingQueues};
 use bevy_render::erased_render_asset::{
-    prepare_erased_assets, ErasedRenderAsset, ErasedRenderAssetPlugin, ErasedRenderAssets,
+    ErasedRenderAsset, ErasedRenderAssetDependency, ErasedRenderAssetPlugin, ErasedRenderAssets,
     PrepareAssetError,
 };
 use bevy_render::material_bind_groups::{
@@ -441,6 +441,17 @@ impl<M: Material> Default for MaterialPlugin<M> {
     }
 }
 
+struct MaterialImageDependency;
+
+impl ErasedRenderAssetDependency for MaterialImageDependency {
+    fn register_system(
+        render_app: &mut bevy_app::SubApp,
+        system: bevy_ecs::schedule::ScheduleConfigs<bevy_ecs::schedule::ScheduleSystem>,
+    ) {
+        render_app.add_systems(Render, system.after(prepare_assets::<GpuImage>));
+    }
+}
+
 impl<M: Material> Plugin for MaterialPlugin<M>
 where
     M::Data: PartialEq + Eq + Hash + Clone,
@@ -449,7 +460,10 @@ where
         app.init_asset::<M>()
             .register_type::<MeshMaterial3d<M>>()
             .init_resource::<EntitiesNeedingSpecialization<M>>()
-            .add_plugins((ErasedRenderAssetPlugin::<MeshMaterial3d<M>>::default(),))
+            .add_plugins((ErasedRenderAssetPlugin::<
+                MeshMaterial3d<M>,
+                MaterialImageDependency,
+            >::default(),))
             .add_systems(
                 PostUpdate,
                 (
@@ -462,12 +476,6 @@ where
         if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
             let shaders = initialize_material_shaders::<M>(render_app.world());
             render_app
-                .configure_sets(
-                    Render,
-                    prepare_erased_assets::<MeshMaterial3d<M>>
-                        .into_system_set()
-                        .after(prepare_assets::<GpuImage>),
-                )
                 .insert_resource(MaterialShaders::<M>::with_shader_cache(shaders))
                 .add_systems(RenderStartup, add_material_bind_group_allocator::<M>)
                 .add_systems(
