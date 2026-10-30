@@ -38,17 +38,15 @@ use bevy_reflect::Reflect;
 use bevy_render::batching::gpu_preprocessing::BatchedInstanceBuffers;
 use bevy_render::camera::{DirtySpecializationSystems, DirtySpecializations, PendingQueues};
 use bevy_render::erased_render_asset::{
-    ErasedRenderAsset, ErasedRenderAssetDependency, ErasedRenderAssetPlugin, ErasedRenderAssets,
-    PrepareAssetError,
+    ErasedRenderAsset, ErasedRenderAssetPlugin, ErasedRenderAssets, PrepareAssetError,
 };
 use bevy_render::material_bind_groups::{
     material_uses_bindless_resources, FallbackBuffer, MaterialBindGroupAllocators,
     MaterialBindingId, RenderMaterialBindings,
 };
-use bevy_render::render_asset::{prepare_assets, PrepareNextFrameAssets, RenderAssets};
+use bevy_render::render_asset::{prepare_assets, RenderAssets};
 use bevy_render::storage::GpuShaderBuffer;
 use bevy_render::sync_world::MainEntityHashSet;
-use bevy_render::texture::GpuImage;
 use bevy_render::view::RenderVisibleEntities;
 use bevy_render::GpuResourceAppExt;
 use bevy_render::RenderStartup;
@@ -441,17 +439,6 @@ impl<M: Material> Default for MaterialPlugin<M> {
     }
 }
 
-struct MaterialImageDependency;
-
-impl ErasedRenderAssetDependency for MaterialImageDependency {
-    fn register_system(
-        render_app: &mut SubApp,
-        system: bevy_ecs::schedule::ScheduleConfigs<bevy_ecs::system::ScheduleSystem>,
-    ) {
-        render_app.add_systems(Render, system.after(prepare_assets::<GpuImage>));
-    }
-}
-
 impl<M: Material> Plugin for MaterialPlugin<M>
 where
     M::Data: PartialEq + Eq + Hash + Clone,
@@ -460,10 +447,7 @@ where
         app.init_asset::<M>()
             .register_type::<MeshMaterial3d<M>>()
             .init_resource::<EntitiesNeedingSpecialization<M>>()
-            .add_plugins((ErasedRenderAssetPlugin::<
-                MeshMaterial3d<M>,
-                MaterialImageDependency,
-            >::default(),))
+            .add_plugins((ErasedRenderAssetPlugin::<MeshMaterial3d<M>>::default(),))
             .add_systems(
                 PostUpdate,
                 (
@@ -1658,12 +1642,7 @@ where
         ),
         SRes<MaterialShaders<M>>,
         M::Param,
-        SRes<PrepareNextFrameAssets<GpuImage>>,
     );
-
-    fn retain_previous() -> bool {
-        true
-    }
 
     fn prepare_asset(
         material: Self::SourceAsset,
@@ -1689,12 +1668,8 @@ where
             ),
             material_shaders,
             material_param,
-            pending_images,
         ): &mut SystemParamItem<Self::Param>,
     ) -> Result<Self::ErasedAsset, PrepareAssetError<Self::SourceAsset>> {
-        if !pending_images.is_empty() {
-            return Err(PrepareAssetError::RetryNextUpdate(material));
-        }
         let material_layout = M::bind_group_layout_descriptor(render_device);
 
         let binding = render_material_bindings.prepare_material(
