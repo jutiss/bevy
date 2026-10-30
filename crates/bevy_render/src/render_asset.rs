@@ -92,6 +92,13 @@ pub trait RenderAsset: Send + Sync + 'static + Sized {
     ) {
     }
 
+    /// Discard preparation retained for a source that was replaced or removed.
+    fn cancel_preparation(
+        _source_asset: AssetId<Self::SourceAsset>,
+        _param: &mut SystemParamItem<Self::Param>,
+    ) {
+    }
+
     /// Make a copy of the asset to be moved to the `RenderWorld` / gpu. Heavy internal data (pixels, vertex attributes)
     /// should be moved into the copy, leaving this asset with only metadata.
     /// An error may be returned to indicate that the asset has already been extracted, and should not
@@ -400,6 +407,9 @@ pub fn prepare_assets<A: RenderAsset>(
     let mut wrote_asset_count = 0;
 
     let mut param = param.into_inner();
+    for id in extracted_assets.removed.union(&extracted_assets.added) {
+        A::cancel_preparation(*id, &mut param);
+    }
     let queued_assets = core::mem::take(&mut prepare_next_frame.assets);
     for (id, extracted_asset) in queued_assets {
         if extracted_assets.removed.contains(&id) || extracted_assets.added.contains(&id) {
@@ -565,6 +575,12 @@ impl RenderAssetBytesPerFrameLimiter {
             return false;
         }
         true
+    }
+
+    pub(crate) fn remaining_bytes(&self) -> usize {
+        self.max_bytes.map_or(usize::MAX, |max| {
+            max.saturating_sub(self.bytes_written.load(Ordering::Relaxed))
+        })
     }
 
     /// Check how many bytes are available for writing.

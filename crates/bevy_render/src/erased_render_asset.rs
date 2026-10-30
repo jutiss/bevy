@@ -393,6 +393,9 @@ pub fn prepare_erased_assets<A: ErasedRenderAsset>(
         }
         let write_bytes = size.unwrap_or(0);
 
+        #[cfg(feature = "trace")]
+        let _span =
+            bevy_log::info_span!("prepare material", kind = core::any::type_name::<A>()).entered();
         match A::prepare_asset(extracted_asset, id, &mut param) {
             Ok(prepared_asset) => {
                 render_assets.insert(id, prepared_asset);
@@ -430,6 +433,9 @@ pub fn prepare_erased_assets<A: ErasedRenderAsset>(
         }
         let write_bytes = size.unwrap_or(0);
 
+        #[cfg(feature = "trace")]
+        let _span =
+            bevy_log::info_span!("prepare material", kind = core::any::type_name::<A>()).entered();
         match A::prepare_asset(extracted_asset, id, &mut param) {
             Ok(prepared_asset) => {
                 render_assets.insert(id, prepared_asset);
