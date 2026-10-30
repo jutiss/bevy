@@ -38,15 +38,17 @@ use bevy_reflect::Reflect;
 use bevy_render::batching::gpu_preprocessing::BatchedInstanceBuffers;
 use bevy_render::camera::{DirtySpecializationSystems, DirtySpecializations, PendingQueues};
 use bevy_render::erased_render_asset::{
-    ErasedRenderAsset, ErasedRenderAssetPlugin, ErasedRenderAssets, PrepareAssetError,
+    prepare_erased_assets, ErasedRenderAsset, ErasedRenderAssetPlugin, ErasedRenderAssets,
+    PrepareAssetError,
 };
 use bevy_render::material_bind_groups::{
     material_uses_bindless_resources, FallbackBuffer, MaterialBindGroupAllocators,
     MaterialBindingId, RenderMaterialBindings,
 };
-use bevy_render::render_asset::{prepare_assets, RenderAssets};
+use bevy_render::render_asset::{prepare_assets, PrepareNextFrameAssets, RenderAssets};
 use bevy_render::storage::GpuShaderBuffer;
 use bevy_render::sync_world::MainEntityHashSet;
+use bevy_render::texture::GpuImage;
 use bevy_render::view::RenderVisibleEntities;
 use bevy_render::GpuResourceAppExt;
 use bevy_render::RenderStartup;
@@ -460,6 +462,12 @@ where
         if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
             let shaders = initialize_material_shaders::<M>(render_app.world());
             render_app
+                .configure_sets(
+                    Render,
+                    prepare_erased_assets::<MeshMaterial3d<M>>
+                        .into_system_set()
+                        .after(prepare_assets::<GpuImage>),
+                )
                 .insert_resource(MaterialShaders::<M>::with_shader_cache(shaders))
                 .add_systems(RenderStartup, add_material_bind_group_allocator::<M>)
                 .add_systems(
@@ -1642,7 +1650,12 @@ where
         ),
         SRes<MaterialShaders<M>>,
         M::Param,
+        SRes<PrepareNextFrameAssets<GpuImage>>,
     );
+
+    fn retain_previous() -> bool {
+        true
+    }
 
     fn prepare_asset(
         material: Self::SourceAsset,
@@ -1668,8 +1681,12 @@ where
             ),
             material_shaders,
             material_param,
+            pending_images,
         ): &mut SystemParamItem<Self::Param>,
     ) -> Result<Self::ErasedAsset, PrepareAssetError<Self::SourceAsset>> {
+        if !pending_images.is_empty() {
+            return Err(PrepareAssetError::RetryNextUpdate(material));
+        }
         let material_layout = M::bind_group_layout_descriptor(render_device);
 
         let binding = render_material_bindings.prepare_material(

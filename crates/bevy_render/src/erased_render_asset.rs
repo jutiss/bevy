@@ -64,6 +64,11 @@ pub trait ErasedRenderAsset: Send + Sync + 'static {
         None
     }
 
+    /// Keep the last complete representation when a replacement must retry.
+    fn retain_previous() -> bool {
+        false
+    }
+
     /// Prepares the [`ErasedRenderAsset::SourceAsset`] for the GPU by transforming it into a [`ErasedRenderAsset`].
     ///
     /// ECS data may be accessed via `param`.
@@ -421,10 +426,10 @@ pub fn prepare_erased_assets<A: ErasedRenderAsset>(
     }
 
     for (id, extracted_asset) in extracted_assets.extracted.drain(..) {
-        let updating = render_assets.remove(id).is_some();
+        let previous_asset = render_assets.remove(id);
 
         let size = A::byte_len(&extracted_asset);
-        if !updating && !bpf.try_start(size) {
+        if previous_asset.is_none() && !bpf.try_start(size) {
             prepare_next_frame.assets.push((id, extracted_asset));
             continue;
         }
@@ -442,6 +447,11 @@ pub fn prepare_erased_assets<A: ErasedRenderAsset>(
             Err(PrepareAssetError::RetryNextUpdate(extracted_asset)) => {
                 bpf.defer();
                 prepare_next_frame.assets.push((id, extracted_asset));
+                if A::retain_previous()
+                    && let Some(previous) = previous_asset
+                {
+                    render_assets.insert(id, previous);
+                }
             }
             Err(PrepareAssetError::AsBindGroupError(e)) => {
                 error!(
@@ -478,6 +488,9 @@ mod budget_tests {
         type SourceAsset = Source;
         type ErasedAsset = usize;
         type Param = ();
+        fn retain_previous() -> bool {
+            true
+        }
         fn prepare_asset(
             source: Source,
             _: AssetId<Source>,
@@ -489,6 +502,61 @@ mod budget_tests {
                 Ok(source.value)
             }
         }
+    }
+
+    #[test]
+    fn a_retrying_replacement_retains_the_complete_material() {
+        let mut app = App::new();
+        app.init_resource::<ExtractedAssets<Prepared>>()
+            .init_resource::<PrepareNextFrameAssets<Prepared>>()
+            .init_resource::<ErasedRenderAssets<usize>>()
+            .init_resource::<RenderAssetBytesPerFrameLimiter>()
+            .add_systems(Update, prepare_erased_assets::<Prepared>);
+        let mut sources = Assets::<Source>::default();
+        let handle = sources.add(Source {
+            value: 1,
+            retry: false,
+        });
+        app.world_mut()
+            .resource_mut::<ErasedRenderAssets<usize>>()
+            .insert(handle.id(), 1);
+        app.world_mut()
+            .resource_mut::<ExtractedAssets<Prepared>>()
+            .extracted
+            .push((
+                handle.id(),
+                Source {
+                    value: 2,
+                    retry: true,
+                },
+            ));
+        for _ in 0..2 {
+            app.update();
+            assert_eq!(
+                app.world()
+                    .resource::<ErasedRenderAssets<usize>>()
+                    .get(handle.id()),
+                Some(&1)
+            );
+        }
+        {
+            let mut extracted = app.world_mut().resource_mut::<ExtractedAssets<Prepared>>();
+            extracted.added.insert(handle.id());
+            extracted.extracted.push((
+                handle.id(),
+                Source {
+                    value: 3,
+                    retry: false,
+                },
+            ));
+        }
+        app.update();
+        assert_eq!(
+            app.world()
+                .resource::<ErasedRenderAssets<usize>>()
+                .get(handle.id()),
+            Some(&3)
+        );
     }
 
     #[test]

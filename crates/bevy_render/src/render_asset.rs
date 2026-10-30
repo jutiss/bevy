@@ -393,6 +393,11 @@ pub struct PrepareNextFrameAssets<A: RenderAsset> {
 }
 
 impl<A: RenderAsset> PrepareNextFrameAssets<A> {
+    /// Whether no source is still preparing.
+    pub fn is_empty(&self) -> bool {
+        self.assets.is_empty()
+    }
+
     /// Whether a source still has a replacement or first representation preparing.
     pub fn contains(&self, id: AssetId<A::SourceAsset>) -> bool {
         self.assets.iter().any(|(pending, _)| *pending == id)
