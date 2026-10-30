@@ -445,8 +445,8 @@ struct MaterialImageDependency;
 
 impl ErasedRenderAssetDependency for MaterialImageDependency {
     fn register_system(
-        render_app: &mut bevy_app::SubApp,
-        system: bevy_ecs::schedule::ScheduleConfigs<bevy_ecs::schedule::ScheduleSystem>,
+        render_app: &mut SubApp,
+        system: bevy_ecs::schedule::ScheduleConfigs<bevy_ecs::system::ScheduleSystem>,
     ) {
         render_app.add_systems(Render, system.after(prepare_assets::<GpuImage>));
     }
