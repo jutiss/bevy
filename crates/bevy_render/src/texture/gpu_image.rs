@@ -451,6 +451,12 @@ mod upload_tests {
             app.update();
             assert_eq!(
                 app.world()
+                    .resource::<PrepareNextFrameAssets<GpuImage>>()
+                    .is_empty(),
+                frame == 3
+            );
+            assert_eq!(
+                app.world()
                     .resource::<RenderAssetBytesPerFrameLimiter>()
                     .bytes_written
                     .load(core::sync::atomic::Ordering::Relaxed),
