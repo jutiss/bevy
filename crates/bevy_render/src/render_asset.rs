@@ -523,6 +523,7 @@ pub fn extract_render_asset_bytes_per_frame(
 ) {
     bpf_limiter.max_bytes = bpf.max_bytes;
     bpf_limiter.max_assets = bpf.max_assets;
+    bpf_limiter.max_erased_assets = bpf.max_erased_assets;
     bpf_limiter.max_specializations = bpf.max_specializations;
 }
 
@@ -534,6 +535,8 @@ pub struct RenderAssetBytesPerFrame {
     pub max_bytes: Option<usize>,
     /// Maximum initial preparation attempts, including retries and unsized assets; existing updates stay in-frame.
     pub max_assets: Option<usize>,
+    /// Maximum initial erased-asset attempts within the shared asset allowance.
+    pub max_erased_assets: Option<usize>,
     /// Maximum uncached mesh specializations per frame; independent of asset preparation.
     pub max_specializations: Option<usize>,
 }
@@ -550,6 +553,7 @@ impl RenderAssetBytesPerFrame {
         Self {
             max_bytes: Some(max_bytes),
             max_assets: None,
+            max_erased_assets: None,
             max_specializations: None,
         }
     }
@@ -566,6 +570,9 @@ pub struct RenderAssetBytesPerFrameLimiter {
     pub bytes_written: AtomicUsize,
     /// Maximum preparation attempts, copied during extraction.
     pub max_assets: Option<usize>,
+    /// Maximum erased-asset attempts within the shared allowance, copied during extraction.
+    pub max_erased_assets: Option<usize>,
+    erased_attempts: AtomicUsize,
     /// Maximum uncached mesh specializations, copied during extraction.
     pub max_specializations: Option<usize>,
     specializations: AtomicUsize,
@@ -578,6 +585,7 @@ impl RenderAssetBytesPerFrameLimiter {
     pub fn reset(&mut self) {
         self.bytes_written.store(0, Ordering::Relaxed);
         self.attempts.store(0, Ordering::Relaxed);
+        self.erased_attempts.store(0, Ordering::Relaxed);
         self.specializations.store(0, Ordering::Relaxed);
         self.pending.store(false, Ordering::Relaxed);
     }
@@ -604,6 +612,17 @@ impl RenderAssetBytesPerFrameLimiter {
             return false;
         }
         true
+    }
+
+    /// Apply the erased-asset sublimit before spending a shared preparation slot.
+    pub(crate) fn try_start_erased(&self, size: Option<usize>) -> bool {
+        if let Some(max) = self.max_erased_assets
+            && self.erased_attempts.fetch_add(1, Ordering::Relaxed) >= max
+        {
+            self.defer();
+            return false;
+        }
+        self.try_start(size)
     }
 
     /// Admit one uncached mesh specialization without spending asset preparation slots.

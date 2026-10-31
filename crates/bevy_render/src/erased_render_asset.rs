@@ -387,7 +387,7 @@ pub fn prepare_erased_assets<A: ErasedRenderAsset>(
         }
 
         let size = A::byte_len(&extracted_asset);
-        if render_assets.get(id).is_none() && !bpf.try_start(size) {
+        if render_assets.get(id).is_none() && !bpf.try_start_erased(size) {
             prepare_next_frame.assets.push((id, extracted_asset));
             continue;
         }
@@ -424,7 +424,7 @@ pub fn prepare_erased_assets<A: ErasedRenderAsset>(
         let updating = render_assets.remove(id).is_some();
 
         let size = A::byte_len(&extracted_asset);
-        if !updating && !bpf.try_start(size) {
+        if !updating && !bpf.try_start_erased(size) {
             prepare_next_frame.assets.push((id, extracted_asset));
             continue;
         }
@@ -474,6 +474,19 @@ mod budget_tests {
         retry: bool,
     }
     struct Prepared;
+    struct SizedPrepared;
+    impl crate::render_asset::RenderAsset for SizedPrepared {
+        type SourceAsset = Source;
+        type Param = ();
+        fn prepare_asset(
+            _: Source,
+            _: AssetId<Source>,
+            _: &mut SystemParamItem<Self::Param>,
+            _: Option<&Self>,
+        ) -> Result<Self, crate::render_asset::PrepareAssetError<Source>> {
+            Ok(Self)
+        }
+    }
     impl ErasedRenderAsset for Prepared {
         type SourceAsset = Source;
         type ErasedAsset = usize;
@@ -489,6 +502,184 @@ mod budget_tests {
                 Ok(source.value)
             }
         }
+    }
+
+    #[test]
+    fn erased_preparation_has_a_sublimit_without_spending_other_assets_slots() {
+        use crate::render_asset::{
+            prepare_assets, ExtractedAssets as SizedExtracted, PrepareNextFrameAssets as SizedNext,
+            RenderAssets,
+        };
+        let mut app = App::new();
+        let mut limit = RenderAssetBytesPerFrameLimiter::default();
+        limit.max_assets = Some(3);
+        limit.max_erased_assets = Some(2);
+        app.init_resource::<ExtractedAssets<Prepared>>()
+            .init_resource::<PrepareNextFrameAssets<Prepared>>()
+            .init_resource::<ErasedRenderAssets<usize>>()
+            .init_resource::<SizedExtracted<SizedPrepared>>()
+            .init_resource::<SizedNext<SizedPrepared>>()
+            .init_resource::<RenderAssets<SizedPrepared>>()
+            .insert_resource(limit)
+            .add_systems(
+                Update,
+                (
+                    crate::render_asset::reset_render_asset_bytes_per_frame,
+                    prepare_erased_assets::<Prepared>,
+                    prepare_assets::<SizedPrepared>,
+                )
+                    .chain(),
+            );
+        let mut sources = Assets::<Source>::default();
+        let ids: Vec<_> = (0..7)
+            .map(|value| {
+                sources.add(Source {
+                    value,
+                    retry: false,
+                })
+            })
+            .collect();
+        app.world_mut()
+            .resource_mut::<ExtractedAssets<Prepared>>()
+            .extracted = ids[..3]
+            .iter()
+            .map(|h| (h.id(), sources.get(h).unwrap().clone()))
+            .collect();
+        app.world_mut()
+            .resource_mut::<SizedExtracted<SizedPrepared>>()
+            .extracted = ids[3..5]
+            .iter()
+            .map(|h| (h.id(), sources.get(h).unwrap().clone()))
+            .collect();
+        app.update();
+        assert_eq!(
+            app.world()
+                .resource::<ErasedRenderAssets<usize>>()
+                .iter()
+                .count(),
+            2
+        );
+        assert_eq!(
+            app.world()
+                .resource::<RenderAssets<SizedPrepared>>()
+                .iter()
+                .count(),
+            1,
+            "an erased denial leaves the third shared slot for another class"
+        );
+        app.world_mut()
+            .resource_mut::<RenderAssetBytesPerFrameLimiter>()
+            .max_erased_assets = Some(0);
+        app.update();
+        assert_eq!(
+            app.world()
+                .resource::<ErasedRenderAssets<usize>>()
+                .iter()
+                .count(),
+            2
+        );
+        assert_eq!(
+            app.world()
+                .resource::<RenderAssets<SizedPrepared>>()
+                .iter()
+                .count(),
+            2,
+            "zero erased allowance still permits other preparation"
+        );
+        {
+            let mut limit = app
+                .world_mut()
+                .resource_mut::<RenderAssetBytesPerFrameLimiter>();
+            limit.max_assets = Some(0);
+            limit.max_erased_assets = Some(2);
+        }
+        app.update();
+        assert_eq!(
+            app.world()
+                .resource::<ErasedRenderAssets<usize>>()
+                .iter()
+                .count(),
+            2,
+            "the global cap still applies"
+        );
+        {
+            let mut limit = app
+                .world_mut()
+                .resource_mut::<RenderAssetBytesPerFrameLimiter>();
+            limit.max_assets = Some(3);
+            limit.max_erased_assets = Some(1);
+        }
+        app.update();
+        assert_eq!(
+            app.world()
+                .resource::<ErasedRenderAssets<usize>>()
+                .iter()
+                .count(),
+            3,
+            "deferred work progresses after reset"
+        );
+        {
+            let mut limit = app
+                .world_mut()
+                .resource_mut::<RenderAssetBytesPerFrameLimiter>();
+            limit.max_assets = Some(0);
+            limit.max_erased_assets = Some(0);
+        }
+        app.world_mut()
+            .resource_mut::<ExtractedAssets<Prepared>>()
+            .extracted = vec![
+            (
+                ids[0].id(),
+                Source {
+                    value: 99,
+                    retry: false,
+                },
+            ),
+            (ids[5].id(), sources.get(&ids[5]).unwrap().clone()),
+        ];
+        app.world_mut()
+            .resource_mut::<SizedExtracted<SizedPrepared>>()
+            .extracted = vec![(ids[6].id(), sources.get(&ids[6]).unwrap().clone())];
+        app.update();
+        assert_eq!(
+            app.world()
+                .resource::<ErasedRenderAssets<usize>>()
+                .get(ids[0].id()),
+            Some(&99),
+            "existing updates stay in frame"
+        );
+        assert!(app
+            .world()
+            .resource::<ErasedRenderAssets<usize>>()
+            .get(ids[5].id())
+            .is_none());
+        assert!(app
+            .world()
+            .resource::<RenderAssetBytesPerFrameLimiter>()
+            .has_pending());
+        {
+            let mut limit = app
+                .world_mut()
+                .resource_mut::<RenderAssetBytesPerFrameLimiter>();
+            limit.max_assets = None;
+            limit.max_erased_assets = None;
+        }
+        app.update();
+        assert_eq!(
+            app.world()
+                .resource::<ErasedRenderAssets<usize>>()
+                .get(ids[5].id()),
+            Some(&5)
+        );
+        assert!(app
+            .world()
+            .resource::<RenderAssets<SizedPrepared>>()
+            .get(ids[6].id())
+            .is_some());
+        assert!(!app
+            .world()
+            .resource::<RenderAssetBytesPerFrameLimiter>()
+            .has_pending());
     }
 
     #[test]
