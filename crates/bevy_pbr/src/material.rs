@@ -44,7 +44,7 @@ use bevy_render::material_bind_groups::{
     material_uses_bindless_resources, FallbackBuffer, MaterialBindGroupAllocators,
     MaterialBindingId, RenderMaterialBindings,
 };
-use bevy_render::render_asset::{prepare_assets, RenderAssets};
+use bevy_render::render_asset::{prepare_assets, RenderAssetBytesPerFrameLimiter, RenderAssets};
 use bevy_render::storage::GpuShaderBuffer;
 use bevy_render::sync_world::MainEntityHashSet;
 use bevy_render::view::RenderVisibleEntities;
@@ -987,6 +987,7 @@ pub(crate) struct SpecializeMaterialMeshesSystemParam<'w, 's> {
     specialized_material_pipeline_cache: ResMut<'w, SpecializedMaterialPipelineCache>,
     pending_mesh_material_queues: ResMut<'w, PendingMeshMaterialQueues>,
     dirty_specializations: Res<'w, DirtySpecializations>,
+    specialization_budget: Res<'w, RenderAssetBytesPerFrameLimiter>,
 }
 
 pub(crate) fn specialize_material_meshes(
@@ -1015,6 +1016,7 @@ pub(crate) fn specialize_material_meshes(
             mut specialized_material_pipeline_cache,
             mut pending_mesh_material_queues,
             dirty_specializations,
+            specialization_budget,
         } = state.get_mut(world).unwrap();
 
         for (view, visible_entities) in &views {
@@ -1143,6 +1145,12 @@ pub(crate) fn specialize_material_meshes(
                     }
                 }
 
+                if !specialization_budget.try_start(None) {
+                    view_pending_mesh_material_queues
+                        .current_frame
+                        .insert((*render_entity, *visible_entity));
+                    continue;
+                }
                 work_items.push(SpecializationWorkItem {
                     visible_entity: *visible_entity,
                     retained_view_entity: view.retained_view_entity,

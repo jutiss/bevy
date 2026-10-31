@@ -578,7 +578,8 @@ impl RenderAssetBytesPerFrameLimiter {
         self.pending.store(true, Ordering::Relaxed);
     }
 
-    pub(crate) fn try_start(&self, size: Option<usize>) -> bool {
+    /// Admit an asset or unsized preparation item, marking denied work pending.
+    pub fn try_start(&self, size: Option<usize>) -> bool {
         if size.is_some() && self.exhausted() {
             self.defer();
             return false;
