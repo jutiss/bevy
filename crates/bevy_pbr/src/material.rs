@@ -997,6 +997,7 @@ pub(crate) fn specialize_material_meshes(
     mut work_items: Local<Vec<SpecializationWorkItem>>,
     mut all_views: Local<HashSet<RetainedViewEntity, FixedHasher>>,
     mut queued: Local<MainEntityHashSet>,
+    mut existing: Local<MainEntityHashSet>,
 ) {
     work_items.clear();
     all_views.clear();
@@ -1043,6 +1044,12 @@ pub(crate) fn specialize_material_meshes(
 
             let mut maybe_specialized_material_pipeline_cache =
                 specialized_material_pipeline_cache.get_mut(&view.retained_view_entity);
+            existing.clear();
+            if specialization_budget.limit_specializations {
+                if let Some(cache) = &maybe_specialized_material_pipeline_cache {
+                    existing.extend(cache.keys().copied());
+                }
+            }
 
             // Remove cached pipeline IDs corresponding to entities that either
             // have been removed or need to be re-specialized.
@@ -1152,7 +1159,7 @@ pub(crate) fn specialize_material_meshes(
                     if !queued.insert(*visible_entity) {
                         continue;
                     }
-                    if !specialization_budget.try_start(None) {
+                    if !existing.contains(visible_entity) && !specialization_budget.try_start(None) {
                         view_pending_mesh_material_queues
                             .current_frame
                             .insert((*render_entity, *visible_entity));
