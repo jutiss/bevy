@@ -1045,7 +1045,7 @@ pub(crate) fn specialize_material_meshes(
             let mut maybe_specialized_material_pipeline_cache =
                 specialized_material_pipeline_cache.get_mut(&view.retained_view_entity);
             existing.clear();
-            if specialization_budget.limit_specializations {
+            if specialization_budget.max_specializations.is_some() {
                 if let Some(cache) = &maybe_specialized_material_pipeline_cache {
                     existing.extend(cache.keys().copied());
                 }
@@ -1155,11 +1155,12 @@ pub(crate) fn specialize_material_meshes(
                     }
                 }
 
-                if specialization_budget.limit_specializations {
+                if specialization_budget.max_specializations.is_some() {
                     if !queued.insert(*visible_entity) {
                         continue;
                     }
-                    if !existing.contains(visible_entity) && !specialization_budget.try_start(None) {
+                    if !existing.contains(visible_entity) && !specialization_budget.try_specialize()
+                    {
                         view_pending_mesh_material_queues
                             .current_frame
                             .insert((*render_entity, *visible_entity));

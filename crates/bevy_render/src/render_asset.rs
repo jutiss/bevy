@@ -518,7 +518,7 @@ pub fn extract_render_asset_bytes_per_frame(
 ) {
     bpf_limiter.max_bytes = bpf.max_bytes;
     bpf_limiter.max_assets = bpf.max_assets;
-    bpf_limiter.limit_specializations = bpf.limit_specializations;
+    bpf_limiter.max_specializations = bpf.max_specializations;
 }
 
 /// A resource that defines the amount of data allowed to be transferred from CPU to GPU
@@ -529,8 +529,8 @@ pub struct RenderAssetBytesPerFrame {
     pub max_bytes: Option<usize>,
     /// Maximum initial preparation attempts, including retries and unsized assets; existing updates stay in-frame.
     pub max_assets: Option<usize>,
-    /// Share the attempt limit with uncached mesh specializations during cold preparation.
-    pub limit_specializations: bool,
+    /// Maximum uncached mesh specializations per frame; independent of asset preparation.
+    pub max_specializations: Option<usize>,
 }
 
 impl RenderAssetBytesPerFrame {
@@ -545,7 +545,7 @@ impl RenderAssetBytesPerFrame {
         Self {
             max_bytes: Some(max_bytes),
             max_assets: None,
-            limit_specializations: false,
+            max_specializations: None,
         }
     }
 }
@@ -561,8 +561,9 @@ pub struct RenderAssetBytesPerFrameLimiter {
     pub bytes_written: AtomicUsize,
     /// Maximum preparation attempts, copied during extraction.
     pub max_assets: Option<usize>,
-    /// Whether uncached mesh specializations share this frame's attempt limit.
-    pub limit_specializations: bool,
+    /// Maximum uncached mesh specializations, copied during extraction.
+    pub max_specializations: Option<usize>,
+    specializations: AtomicUsize,
     attempts: AtomicUsize,
     pending: AtomicBool,
 }
@@ -572,6 +573,7 @@ impl RenderAssetBytesPerFrameLimiter {
     pub fn reset(&mut self) {
         self.bytes_written.store(0, Ordering::Relaxed);
         self.attempts.store(0, Ordering::Relaxed);
+        self.specializations.store(0, Ordering::Relaxed);
         self.pending.store(false, Ordering::Relaxed);
     }
 
@@ -592,6 +594,17 @@ impl RenderAssetBytesPerFrameLimiter {
         }
         if let Some(max) = self.max_assets
             && self.attempts.fetch_add(1, Ordering::Relaxed) >= max
+        {
+            self.defer();
+            return false;
+        }
+        true
+    }
+
+    /// Admit one uncached mesh specialization without spending asset preparation slots.
+    pub fn try_specialize(&self) -> bool {
+        if let Some(max) = self.max_specializations
+            && self.specializations.fetch_add(1, Ordering::Relaxed) >= max
         {
             self.defer();
             return false;
@@ -669,6 +682,35 @@ mod budget_tests {
                 Ok(Self(source.value))
             }
         }
+    }
+
+    #[test]
+    fn specialization_and_asset_admission_progress_independently_and_reset_together() {
+        let mut limit = RenderAssetBytesPerFrameLimiter {
+            max_assets: Some(1),
+            max_specializations: Some(2),
+            ..Default::default()
+        };
+        assert!(limit.try_start(None));
+        assert!(!limit.try_start(None));
+        assert!(limit.try_specialize());
+        assert!(limit.try_specialize());
+        assert!(!limit.try_specialize());
+        assert!(limit.has_pending());
+        limit.reset();
+        assert!(!limit.has_pending());
+        assert!(limit.try_start(None));
+        assert!(limit.try_specialize());
+        limit.max_assets = Some(0);
+        limit.max_specializations = Some(0);
+        assert!(!limit.try_start(None));
+        assert!(!limit.try_specialize());
+        limit.reset();
+        limit.max_specializations = None;
+        for _ in 0..4 {
+            assert!(limit.try_specialize());
+        }
+        assert!(!limit.has_pending());
     }
 
     #[test]
