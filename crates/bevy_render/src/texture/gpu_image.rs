@@ -87,6 +87,14 @@ impl RenderAsset for GpuImage {
         #[cfg(feature = "trace")]
         let _span = bevy_log::info_span!("prepare image", size = ?image.texture_descriptor.size, format = ?image.texture_descriptor.format, bytes = image.data.as_ref().map_or(0, Vec::len)).entered();
         let new_texture = previous.is_none_or(|p| p.texture_descriptor != image.texture_descriptor);
+        // Existing handles still need admission when their replacement allocates a new texture.
+        if previous.is_some()
+            && new_texture
+            && !uploads.0.contains_key(&id)
+            && !budget.try_start(image.data.as_ref().map(Vec::len))
+        {
+            return Err(PrepareAssetError::RetryNextUpdate(image));
+        }
         if !uploads.0.contains_key(&id)
             && new_texture
             && budget.max_assets.is_some()
@@ -420,6 +428,119 @@ mod upload_tests {
                     .chain(),
             );
         app
+    }
+
+    #[test]
+    fn descriptor_replacements_share_admission_and_retain_the_old_texture() {
+        for change in 0..3 {
+            let mut app = app();
+            app.world_mut()
+                .resource_mut::<RenderAssetBytesPerFrameLimiter>()
+                .max_bytes = Some(1024);
+            let mut source = Assets::<Image>::default();
+            let handles: Vec<_> = (0..5).map(|_| source.add(image(1))).collect();
+            for handle in &handles {
+                app.world_mut()
+                    .resource_mut::<ExtractedAssets<GpuImage>>()
+                    .extracted
+                    .push((handle.id(), image(1)));
+            }
+            app.update();
+            let old: Vec<_> = handles
+                .iter()
+                .map(|h| {
+                    app.world()
+                        .resource::<RenderAssets<GpuImage>>()
+                        .get(h.id())
+                        .unwrap()
+                        .texture
+                        .id()
+                })
+                .collect();
+            app.world_mut()
+                .resource_mut::<RenderAssetBytesPerFrameLimiter>()
+                .max_assets = Some(2);
+            for handle in &handles {
+                let mut replacement = image(if change == 0 { 2 } else { 1 });
+                if change == 1 {
+                    replacement.texture_descriptor.format = TextureFormat::R8Uint;
+                }
+                if change == 2 {
+                    replacement.texture_descriptor.label = Some("replacement");
+                }
+                app.world_mut()
+                    .resource_mut::<ExtractedAssets<GpuImage>>()
+                    .extracted
+                    .push((handle.id(), replacement));
+            }
+            for published in [2, 4, 5] {
+                app.update();
+                let images = app.world().resource::<RenderAssets<GpuImage>>();
+                let pending = app.world().resource::<PrepareNextFrameAssets<GpuImage>>();
+                let changed: Vec<_> = handles
+                    .iter()
+                    .zip(&old)
+                    .map(|(h, old)| images.get(h.id()).unwrap().texture.id() != *old)
+                    .collect();
+                assert_eq!(
+                    changed.iter().filter(|&&c| c).count(),
+                    published,
+                    "descriptor class {change}"
+                );
+                for (handle, changed) in handles.iter().zip(changed) {
+                    assert_eq!(pending.contains(handle.id()), !changed);
+                }
+            }
+            app.world_mut()
+                .resource_mut::<RenderAssetBytesPerFrameLimiter>()
+                .max_assets = Some(0);
+            let before: Vec<_> = handles
+                .iter()
+                .map(|h| {
+                    app.world()
+                        .resource::<RenderAssets<GpuImage>>()
+                        .get(h.id())
+                        .unwrap()
+                        .texture
+                        .id()
+                })
+                .collect();
+            for handle in &handles {
+                let mut same = source.get(handle).unwrap().clone();
+                if change == 0 {
+                    same = image(2);
+                }
+                if change == 1 {
+                    same.texture_descriptor.format = TextureFormat::R8Uint;
+                }
+                if change == 2 {
+                    same.texture_descriptor.label = Some("replacement");
+                }
+                same.data.as_mut().unwrap().fill(17);
+                app.world_mut()
+                    .resource_mut::<ExtractedAssets<GpuImage>>()
+                    .extracted
+                    .push((handle.id(), same));
+            }
+            app.update();
+            for (h, before) in handles.iter().zip(before) {
+                assert_eq!(
+                    app.world()
+                        .resource::<RenderAssets<GpuImage>>()
+                        .get(h.id())
+                        .unwrap()
+                        .texture
+                        .id(),
+                    before
+                );
+                assert!(
+                    !app.world()
+                        .resource::<PrepareNextFrameAssets<GpuImage>>()
+                        .contains(h.id()),
+                    "in-place updates bypass the allocation limit and remain whole"
+                );
+            }
+        }
     }
 
     #[test]
