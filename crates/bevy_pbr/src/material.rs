@@ -454,6 +454,7 @@ where
                     mark_meshes_as_changed_if_their_materials_changed::<M>.ambiguous_with_all(),
                     check_entities_needing_specialization::<M>.after(AssetEventSystems),
                 )
+                    .chain()
                     .after(mark_3d_meshes_as_changed_if_their_assets_changed),
             );
 
@@ -995,6 +996,7 @@ pub(crate) fn specialize_material_meshes(
     state: &mut SystemState<SpecializeMaterialMeshesSystemParam>,
     mut work_items: Local<Vec<SpecializationWorkItem>>,
     mut all_views: Local<HashSet<RetainedViewEntity, FixedHasher>>,
+    mut queued: Local<MainEntityHashSet>,
 ) {
     work_items.clear();
     all_views.clear();
@@ -1020,6 +1022,7 @@ pub(crate) fn specialize_material_meshes(
         } = state.get_mut(world).unwrap();
 
         for (view, visible_entities) in &views {
+            queued.clear();
             all_views.insert(view.retained_view_entity);
 
             if !transparent_render_phases.contains_key(&view.retained_view_entity)
@@ -1145,11 +1148,16 @@ pub(crate) fn specialize_material_meshes(
                     }
                 }
 
-                if !specialization_budget.try_start(None) {
-                    view_pending_mesh_material_queues
-                        .current_frame
-                        .insert((*render_entity, *visible_entity));
-                    continue;
+                if specialization_budget.limit_specializations {
+                    if !queued.insert(*visible_entity) {
+                        continue;
+                    }
+                    if !specialization_budget.try_start(None) {
+                        view_pending_mesh_material_queues
+                            .current_frame
+                            .insert((*render_entity, *visible_entity));
+                        continue;
+                    }
                 }
                 work_items.push(SpecializationWorkItem {
                     visible_entity: *visible_entity,

@@ -518,6 +518,7 @@ pub fn extract_render_asset_bytes_per_frame(
 ) {
     bpf_limiter.max_bytes = bpf.max_bytes;
     bpf_limiter.max_assets = bpf.max_assets;
+    bpf_limiter.limit_specializations = bpf.limit_specializations;
 }
 
 /// A resource that defines the amount of data allowed to be transferred from CPU to GPU
@@ -528,6 +529,8 @@ pub struct RenderAssetBytesPerFrame {
     pub max_bytes: Option<usize>,
     /// Maximum initial preparation attempts, including retries and unsized assets; existing updates stay in-frame.
     pub max_assets: Option<usize>,
+    /// Share the attempt limit with uncached mesh specializations during cold preparation.
+    pub limit_specializations: bool,
 }
 
 impl RenderAssetBytesPerFrame {
@@ -542,6 +545,7 @@ impl RenderAssetBytesPerFrame {
         Self {
             max_bytes: Some(max_bytes),
             max_assets: None,
+            limit_specializations: false,
         }
     }
 }
@@ -557,6 +561,8 @@ pub struct RenderAssetBytesPerFrameLimiter {
     pub bytes_written: AtomicUsize,
     /// Maximum preparation attempts, copied during extraction.
     pub max_assets: Option<usize>,
+    /// Whether uncached mesh specializations share this frame's attempt limit.
+    pub limit_specializations: bool,
     attempts: AtomicUsize,
     pending: AtomicBool,
 }
