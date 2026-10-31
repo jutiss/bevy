@@ -87,6 +87,7 @@ impl RenderAsset for GpuImage {
         #[cfg(feature = "trace")]
         let _span = bevy_log::info_span!("prepare image", size = ?image.texture_descriptor.size, format = ?image.texture_descriptor.format, bytes = image.data.as_ref().map_or(0, Vec::len)).entered();
         let new_texture = previous.is_none_or(|p| p.texture_descriptor != image.texture_descriptor);
+        let mut admitted = previous.is_none();
         // Existing handles still need admission when their replacement allocates a new texture.
         if previous.is_some()
             && new_texture
@@ -94,6 +95,9 @@ impl RenderAsset for GpuImage {
             && !budget.try_start(image.data.as_ref().map(Vec::len))
         {
             return Err(PrepareAssetError::RetryNextUpdate(image));
+        }
+        if previous.is_some() && new_texture && !uploads.0.contains_key(&id) {
+            admitted = true;
         }
         if !uploads.0.contains_key(&id)
             && new_texture
@@ -124,9 +128,10 @@ impl RenderAsset for GpuImage {
                     .max(1)
                     .min(copy.range.len() / copy.row as usize) as u32;
                 let len = (rows * copy.row) as usize;
-                if !budget.try_start(Some(len)) {
+                if !admitted && !budget.try_start(Some(len)) {
                     break;
                 }
+                admitted = false;
                 queue.write_texture(
                     wgpu::TexelCopyTextureInfo {
                         texture: &upload.gpu.texture,
@@ -431,6 +436,43 @@ mod upload_tests {
     }
 
     #[test]
+    fn one_admitted_image_transfer_progresses_through_the_production_retry_queue() {
+        let mut app = app();
+        app.world_mut()
+            .resource_mut::<RenderAssetBytesPerFrameLimiter>()
+            .max_assets = Some(1);
+        let mut source = Assets::<Image>::default();
+        let handle = source.add(image(6));
+        app.world_mut()
+            .resource_mut::<ExtractedAssets<GpuImage>>()
+            .extracted
+            .push((handle.id(), image(6)));
+        for frame in 1..=3 {
+            app.update();
+            assert_eq!(
+                app.world()
+                    .resource::<RenderAssetBytesPerFrameLimiter>()
+                    .bytes_written
+                    .load(core::sync::atomic::Ordering::Relaxed),
+                4
+            );
+            assert_eq!(
+                app.world()
+                    .resource::<RenderAssets<GpuImage>>()
+                    .get(handle.id())
+                    .is_some(),
+                frame == 3
+            );
+            assert_eq!(
+                app.world()
+                    .resource::<PrepareNextFrameAssets<GpuImage>>()
+                    .contains(handle.id()),
+                frame != 3
+            );
+        }
+    }
+
+    #[test]
     fn descriptor_replacements_share_admission_and_retain_the_old_texture() {
         for change in 0..3 {
             let mut app = app();
@@ -633,7 +675,7 @@ mod upload_tests {
             .resource_mut::<ExtractedAssets<GpuImage>>()
             .extracted
             .push((handle.id(), image));
-        for _ in 0..5 {
+        for _ in 0..2 {
             app.update();
             assert!(app
                 .world()
@@ -645,7 +687,7 @@ mod upload_tests {
                     .resource::<RenderAssetBytesPerFrameLimiter>()
                     .bytes_written
                     .load(core::sync::atomic::Ordering::Relaxed),
-                2
+                4
             );
         }
         app.update();
