@@ -848,7 +848,7 @@ mod budget_tests {
                     .chain(),
             );
         let mut sources = Assets::<Source>::default();
-        let ids: Vec<_> = (0..8)
+        let ids: Vec<_> = (0..16)
             .map(|value| {
                 sources.add(Source {
                     value,
@@ -877,16 +877,13 @@ mod budget_tests {
                 .capacity()
         };
         app.update();
-        assert_eq!(queued(&app), [1, 2, 3, 4, 5, 6, 7], "0 prepared, 1 retries, the rest over the allowance, in order");
+        assert_eq!(queued(&app), (1..16).collect::<Vec<_>>(), "0 prepared, 1 retries, the rest over the allowance, in order");
         let held = capacity(&app);
-        app.world_mut()
-            .resource_mut::<ExtractedAssets<Prepared>>()
-            .extracted
-            .clear();
         app.update();
-        assert_eq!(queued(&app), [1, 3, 4, 5, 6, 7], "the retry stays first, 2 prepared");
+        assert_eq!(queued(&app), [1].into_iter().chain(3..16).collect::<Vec<_>>(), "the retry stays first, 2 prepared");
         assert_eq!(capacity(&app), held, "the same buffer");
-        // 1 extracted again without its retry: the queued copy is dropped, the new one tried after the queue
+        // 1 extracted again without its retry: the queued copy is dropped, the new one tried after the queue; an allowance of 10
+        // leaves 4 waiting, fewer than half the buffer (a buffer made anew for them would be smaller)
         app.world_mut()
             .resource_mut::<ExtractedAssets<Prepared>>()
             .extracted = vec![(ids[1].id(), Source { value: 1, retry: false })];
@@ -894,19 +891,21 @@ mod budget_tests {
             .resource_mut::<ExtractedAssets<Prepared>>()
             .added
             .insert(ids[1].id());
+        app.world_mut()
+            .resource_mut::<RenderAssetBytesPerFrameLimiter>()
+            .max_erased_assets = Some(10);
         app.update();
-        assert_eq!(queued(&app), [5, 6, 7, 1], "3 and 4 prepared, the stale 1 dropped, the new 1 after the queue");
-        assert_eq!(capacity(&app), held, "the same buffer");
+        assert_eq!(queued(&app), [13, 14, 15, 1], "3 to 12 prepared, the stale 1 dropped, the new 1 after the queue");
+        assert!(4 < held / 2 && capacity(&app) == held, "the same buffer, {held} entries, holding 4");
         {
             let mut extracted = app.world_mut().resource_mut::<ExtractedAssets<Prepared>>();
             extracted.extracted.clear();
             extracted.added.clear();
         }
         app.update();
-        app.update();
         assert!(queued(&app).is_empty());
         let prepared = app.world().resource::<ErasedRenderAssets<usize>>();
-        assert_eq!(ids.iter().map(|h| prepared.get(h.id()).copied()).collect::<Vec<_>>(), (0..8).map(Some).collect::<Vec<_>>());
+        assert_eq!(ids.iter().map(|h| prepared.get(h.id()).copied()).collect::<Vec<_>>(), (0..16).map(Some).collect::<Vec<_>>());
         assert_eq!(capacity(&app), 0, "an empty queue holds no buffer");
     }
 }

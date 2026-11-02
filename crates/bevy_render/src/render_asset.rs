@@ -910,6 +910,14 @@ mod budget_tests {
             .resource::<PrepareNextFrameAssets<Prepared>>()
             .assets
             .is_empty());
+        assert_eq!(
+            app.world()
+                .resource::<PrepareNextFrameAssets<Prepared>>()
+                .assets
+                .capacity(),
+            0,
+            "the queue's buffer, holding two the frame before, let go once its last is prepared or discarded"
+        );
         assert!(!app
             .world()
             .resource::<RenderAssetBytesPerFrameLimiter>()
