@@ -2,6 +2,7 @@ use crate::{
     render_resource::AsBindGroupError, ExtractSchedule, MainWorld, Render, RenderApp,
     RenderStartup, RenderSystems, Res,
 };
+use alloc::collections::VecDeque;
 use bevy_app::{App, Plugin, SubApp};
 use bevy_asset::RenderAssetUsages;
 use bevy_asset::{Asset, AssetEvent, AssetId, Assets, UntypedAssetId};
@@ -352,11 +353,11 @@ pub(crate) fn extract_erased_render_asset<A: ErasedRenderAsset>(
     );
 }
 
-// TODO: consider storing inside system?
-/// All assets that should be prepared next frame.
+/// All assets that should be prepared next frame, in the order they are tried: one ring buffer, its capacity kept while it holds
+/// any (each frame takes the queued from its front and puts those still waiting at its back) and let go once it is empty.
 #[derive(Resource)]
 pub struct PrepareNextFrameAssets<A: ErasedRenderAsset> {
-    assets: Vec<(AssetId<A::SourceAsset>, A::SourceAsset)>,
+    assets: VecDeque<(AssetId<A::SourceAsset>, A::SourceAsset)>,
 }
 
 impl<A: ErasedRenderAsset> Default for PrepareNextFrameAssets<A> {
@@ -379,8 +380,8 @@ pub fn prepare_erased_assets<A: ErasedRenderAsset>(
     let mut wrote_asset_count = 0;
 
     let mut param = param.into_inner();
-    let queued_assets = core::mem::take(&mut prepare_next_frame.assets);
-    for (id, extracted_asset) in queued_assets {
+    for _ in 0..prepare_next_frame.assets.len() {
+        let (id, extracted_asset) = prepare_next_frame.assets.pop_front().unwrap();
         if extracted_assets.removed.contains(&id) || extracted_assets.added.contains(&id) {
             // skip previous frame's assets that have been removed or updated
             continue;
@@ -388,7 +389,7 @@ pub fn prepare_erased_assets<A: ErasedRenderAsset>(
 
         let size = A::byte_len(&extracted_asset);
         if render_assets.get(id).is_none() && !bpf.try_start_erased(size) {
-            prepare_next_frame.assets.push((id, extracted_asset));
+            prepare_next_frame.assets.push_back((id, extracted_asset));
             continue;
         }
         let write_bytes = size.unwrap_or(0);
@@ -404,7 +405,7 @@ pub fn prepare_erased_assets<A: ErasedRenderAsset>(
             }
             Err(PrepareAssetError::RetryNextUpdate(extracted_asset)) => {
                 bpf.defer();
-                prepare_next_frame.assets.push((id, extracted_asset));
+                prepare_next_frame.assets.push_back((id, extracted_asset));
             }
             Err(PrepareAssetError::AsBindGroupError(e)) => {
                 error!(
@@ -425,7 +426,7 @@ pub fn prepare_erased_assets<A: ErasedRenderAsset>(
 
         let size = A::byte_len(&extracted_asset);
         if !updating && !bpf.try_start_erased(size) {
-            prepare_next_frame.assets.push((id, extracted_asset));
+            prepare_next_frame.assets.push_back((id, extracted_asset));
             continue;
         }
         let write_bytes = size.unwrap_or(0);
@@ -441,7 +442,7 @@ pub fn prepare_erased_assets<A: ErasedRenderAsset>(
             }
             Err(PrepareAssetError::RetryNextUpdate(extracted_asset)) => {
                 bpf.defer();
-                prepare_next_frame.assets.push((id, extracted_asset));
+                prepare_next_frame.assets.push_back((id, extracted_asset));
             }
             Err(PrepareAssetError::AsBindGroupError(e)) => {
                 error!(
@@ -459,6 +460,9 @@ pub fn prepare_erased_assets<A: ErasedRenderAsset>(
             prepare_next_frame.assets.len(),
             wrote_asset_count
         );
+    }
+    if prepare_next_frame.assets.is_empty() && prepare_next_frame.assets.capacity() > 0 {
+        prepare_next_frame.assets = VecDeque::new();
     }
 }
 
@@ -824,5 +828,85 @@ mod budget_tests {
             .world()
             .resource::<RenderAssetBytesPerFrameLimiter>()
             .has_pending());
+    }
+
+    #[test]
+    fn deferred_assets_wait_in_one_buffer_in_their_order_and_let_it_go_once_through() {
+        let mut app = App::new();
+        let mut limit = RenderAssetBytesPerFrameLimiter::default();
+        limit.max_erased_assets = Some(2);
+        app.init_resource::<ExtractedAssets<Prepared>>()
+            .init_resource::<PrepareNextFrameAssets<Prepared>>()
+            .init_resource::<ErasedRenderAssets<usize>>()
+            .insert_resource(limit)
+            .add_systems(
+                Update,
+                (
+                    crate::render_asset::reset_render_asset_bytes_per_frame,
+                    prepare_erased_assets::<Prepared>,
+                )
+                    .chain(),
+            );
+        let mut sources = Assets::<Source>::default();
+        let ids: Vec<_> = (0..8)
+            .map(|value| {
+                sources.add(Source {
+                    value,
+                    retry: value == 1,
+                })
+            })
+            .collect();
+        app.world_mut()
+            .resource_mut::<ExtractedAssets<Prepared>>()
+            .extracted = ids
+            .iter()
+            .map(|h| (h.id(), sources.get(h).unwrap().clone()))
+            .collect();
+        let queued = |app: &App| -> Vec<usize> {
+            app.world()
+                .resource::<PrepareNextFrameAssets<Prepared>>()
+                .assets
+                .iter()
+                .map(|(_, source)| source.value)
+                .collect()
+        };
+        let capacity = |app: &App| {
+            app.world()
+                .resource::<PrepareNextFrameAssets<Prepared>>()
+                .assets
+                .capacity()
+        };
+        app.update();
+        assert_eq!(queued(&app), [1, 2, 3, 4, 5, 6, 7], "0 prepared, 1 retries, the rest over the allowance, in order");
+        let held = capacity(&app);
+        app.world_mut()
+            .resource_mut::<ExtractedAssets<Prepared>>()
+            .extracted
+            .clear();
+        app.update();
+        assert_eq!(queued(&app), [1, 3, 4, 5, 6, 7], "the retry stays first, 2 prepared");
+        assert_eq!(capacity(&app), held, "the same buffer");
+        // 1 extracted again without its retry: the queued copy is dropped, the new one tried after the queue
+        app.world_mut()
+            .resource_mut::<ExtractedAssets<Prepared>>()
+            .extracted = vec![(ids[1].id(), Source { value: 1, retry: false })];
+        app.world_mut()
+            .resource_mut::<ExtractedAssets<Prepared>>()
+            .added
+            .insert(ids[1].id());
+        app.update();
+        assert_eq!(queued(&app), [5, 6, 7, 1], "3 and 4 prepared, the stale 1 dropped, the new 1 after the queue");
+        assert_eq!(capacity(&app), held, "the same buffer");
+        {
+            let mut extracted = app.world_mut().resource_mut::<ExtractedAssets<Prepared>>();
+            extracted.extracted.clear();
+            extracted.added.clear();
+        }
+        app.update();
+        app.update();
+        assert!(queued(&app).is_empty());
+        let prepared = app.world().resource::<ErasedRenderAssets<usize>>();
+        assert_eq!(ids.iter().map(|h| prepared.get(h.id()).copied()).collect::<Vec<_>>(), (0..8).map(Some).collect::<Vec<_>>());
+        assert_eq!(capacity(&app), 0, "an empty queue holds no buffer");
     }
 }

@@ -2,6 +2,7 @@ use crate::{
     render_resource::AsBindGroupError, Extract, ExtractSchedule, MainWorld, Render, RenderApp,
     RenderStartup, RenderSystems, Res,
 };
+use alloc::collections::VecDeque;
 use bevy_app::{App, Plugin, SubApp};
 use bevy_asset::{Asset, AssetEvent, AssetId, Assets, RenderAssetUsages};
 use bevy_ecs::{
@@ -385,11 +386,11 @@ pub(crate) fn extract_render_asset<A: RenderAsset>(
     );
 }
 
-// TODO: consider storing inside system?
-/// All assets that should be prepared next frame.
+/// All assets that should be prepared next frame, in the order they are tried: one ring buffer, its capacity kept while it holds
+/// any (each frame takes the queued from its front and puts those still waiting at its back) and let go once it is empty.
 #[derive(Resource)]
 pub struct PrepareNextFrameAssets<A: RenderAsset> {
-    assets: Vec<(AssetId<A::SourceAsset>, A::SourceAsset)>,
+    assets: VecDeque<(AssetId<A::SourceAsset>, A::SourceAsset)>,
 }
 
 impl<A: RenderAsset> PrepareNextFrameAssets<A> {
@@ -427,8 +428,8 @@ pub fn prepare_assets<A: RenderAsset>(
     for id in extracted_assets.removed.union(&extracted_assets.added) {
         A::cancel_preparation(*id, &mut param);
     }
-    let queued_assets = core::mem::take(&mut prepare_next_frame.assets);
-    for (id, extracted_asset) in queued_assets {
+    for _ in 0..prepare_next_frame.assets.len() {
+        let (id, extracted_asset) = prepare_next_frame.assets.pop_front().unwrap();
         if extracted_assets.removed.contains(&id) || extracted_assets.added.contains(&id) {
             // skip previous frame's assets that have been removed or updated
             continue;
@@ -436,7 +437,7 @@ pub fn prepare_assets<A: RenderAsset>(
 
         let size = A::byte_len(&extracted_asset);
         if render_assets.get(id).is_none() && !bpf.try_start(size) {
-            prepare_next_frame.assets.push((id, extracted_asset));
+            prepare_next_frame.assets.push_back((id, extracted_asset));
             continue;
         }
         let write_bytes = size.unwrap_or(0);
@@ -450,7 +451,7 @@ pub fn prepare_assets<A: RenderAsset>(
             }
             Err(PrepareAssetError::RetryNextUpdate(extracted_asset)) => {
                 bpf.defer();
-                prepare_next_frame.assets.push((id, extracted_asset));
+                prepare_next_frame.assets.push_back((id, extracted_asset));
             }
             Err(PrepareAssetError::AsBindGroupError(e)) => {
                 error!(
@@ -472,7 +473,7 @@ pub fn prepare_assets<A: RenderAsset>(
 
         let size = A::byte_len(&extracted_asset);
         if previous_asset.is_none() && !bpf.try_start(size) {
-            prepare_next_frame.assets.push((id, extracted_asset));
+            prepare_next_frame.assets.push_back((id, extracted_asset));
             continue;
         }
         let write_bytes = size.unwrap_or(0);
@@ -485,7 +486,7 @@ pub fn prepare_assets<A: RenderAsset>(
             }
             Err(PrepareAssetError::RetryNextUpdate(extracted_asset)) => {
                 bpf.defer();
-                prepare_next_frame.assets.push((id, extracted_asset));
+                prepare_next_frame.assets.push_back((id, extracted_asset));
                 if A::retain_previous()
                     && let Some(previous) = previous_asset
                 {
@@ -508,6 +509,9 @@ pub fn prepare_assets<A: RenderAsset>(
             prepare_next_frame.assets.len(),
             wrote_asset_count
         );
+    }
+    if prepare_next_frame.assets.is_empty() && prepare_next_frame.assets.capacity() > 0 {
+        prepare_next_frame.assets = VecDeque::new();
     }
 }
 
