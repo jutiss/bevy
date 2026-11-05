@@ -93,7 +93,7 @@ struct Fog {
     /// `be` and `bi` are allocated differently depending on the fog mode
     ///
     /// For Linear Fog:
-    ///     be.x = start, be.y = end
+    ///     be.x = start, be.y = end, be.z = power (1 for Linear, the power for Power)
     /// For Exponential and ExponentialSquared Fog:
     ///     be.x = density
     /// For Atmospheric Fog:

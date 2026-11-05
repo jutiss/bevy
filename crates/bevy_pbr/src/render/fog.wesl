@@ -24,6 +24,11 @@ fn scattering_adjusted_fog_color(
     }
 }
 
+// The linear mode's fog amount at a distance: the share of the way from start to end, saturated, raised to the power (1 for Linear).
+fn linear_fog_amount(fog_params: Fog, distance: f32) -> f32 {
+    return pow(saturate((distance - fog_params.be.x) / (fog_params.be.y - fog_params.be.x)), fog_params.be.z);
+}
+
 fn linear_fog(
     fog_params: Fog,
     input_color: vec4<f32>,
@@ -31,9 +36,7 @@ fn linear_fog(
     scattering: vec3<f32>,
 ) -> vec4<f32> {
     var fog_color = scattering_adjusted_fog_color(fog_params, scattering);
-    let start = fog_params.be.x;
-    let end = fog_params.be.y;
-    fog_color.a *= 1.0 - clamp((end - distance) / (end - start), 0.0, 1.0);
+    fog_color.a *= linear_fog_amount(fog_params, distance);
     return vec4<f32>(mix(input_color.rgb, fog_color.rgb, fog_color.a), input_color.a);
 }
 

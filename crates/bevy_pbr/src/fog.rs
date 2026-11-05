@@ -17,6 +17,7 @@ use crate::ViewFogUniformOffset;
 /// Currently, the following fog falloff modes are supported:
 ///
 /// - [`FogFalloff::Linear`]
+/// - [`FogFalloff::Power`]
 /// - [`FogFalloff::Exponential`]
 /// - [`FogFalloff::ExponentialSquared`]
 /// - [`FogFalloff::Atmospheric`]
@@ -135,6 +136,20 @@ pub enum FogFalloff {
 
         /// Distance from the camera where fog is completely opaque, in world units.
         end: f32,
+    },
+
+    /// The linear falloff's amount raised to a `power`: `saturate((distance - start) / (end - start))^power`.
+    ///
+    /// A power of 1 is [`FogFalloff::Linear`]; above 1 the fog stays thin past `start` and thickens late toward `end`.
+    Power {
+        /// Distance from the camera where fog is completely transparent, in world units.
+        start: f32,
+
+        /// Distance from the camera where fog is completely opaque, in world units.
+        end: f32,
+
+        /// The exponent the linear amount is raised to; greater than 0.
+        power: f32,
     },
 
     /// An exponential fog falloff with a given `density`.
