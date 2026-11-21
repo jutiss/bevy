@@ -2563,7 +2563,12 @@ pub(crate) fn specialize_shadows(
                 {
                     continue;
                 }
+                // A mesh not prepared yet (one the upload allowance holds back) is
+                // retried next frame, as a missing material is.
                 let Some(mesh) = render_meshes.get(mesh_instance.mesh_asset_id()) else {
+                    view_pending_shadow_queues
+                        .current_frame
+                        .insert((*render_entity, *visible_entity));
                     continue;
                 };
 

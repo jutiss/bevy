@@ -1106,7 +1106,12 @@ pub(crate) fn specialize_material_meshes(
                         .insert((*render_entity, *visible_entity));
                     continue;
                 };
+                // A mesh not prepared yet (one the upload allowance holds back) is
+                // retried next frame, as a missing material is.
                 let Some(mesh) = render_meshes.get(mesh_instance.mesh_asset_id()) else {
+                    view_pending_mesh_material_queues
+                        .current_frame
+                        .insert((*render_entity, *visible_entity));
                     continue;
                 };
                 let Some(material) = render_materials.get(material_instance.asset_id) else {
