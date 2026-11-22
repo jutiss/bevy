@@ -138,9 +138,11 @@ pub enum FogFalloff {
         end: f32,
     },
 
-    /// The linear falloff's amount raised to a `power`: `saturate((distance - start) / (end - start))^power`.
+    /// The linear falloff's amount, plus a ramped extra share, raised to a `power`:
+    /// `saturate(saturate((distance - start) / (end - start)) + extra.x * saturate((distance - extra.y) * extra.z))^power`.
     ///
-    /// A power of 1 is [`FogFalloff::Linear`]; above 1 the fog stays thin past `start` and thickens late toward `end`.
+    /// A power of 1 and no extra share is [`FogFalloff::Linear`]; above 1 the fog stays thin past `start` and thickens late toward
+    /// `end`. The extra share (a weather's precipitation fog) adds `extra.x` from `extra.y` on over `1 / extra.z` world units.
     Power {
         /// Distance from the camera where fog is completely transparent, in world units.
         start: f32,
@@ -150,6 +152,9 @@ pub enum FogFalloff {
 
         /// The exponent the linear amount is raised to; greater than 0.
         power: f32,
+
+        /// The extra share, its start in world units and its ramp per world unit; zero for none.
+        extra: Vec3,
     },
 
     /// An exponential fog falloff with a given `density`.

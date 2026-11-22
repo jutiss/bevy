@@ -24,9 +24,12 @@ fn scattering_adjusted_fog_color(
     }
 }
 
-// The linear mode's fog amount at a distance: the share of the way from start to end, saturated, raised to the power (1 for Linear).
+// The linear mode's fog amount at a distance: the share of the way from start to end, saturated, plus the Power mode's extra share
+// ramped in from its start (none for Linear), saturated, raised to the power (1 for Linear).
 fn linear_fog_amount(fog_params: Fog, distance: f32) -> f32 {
-    return pow(saturate((distance - fog_params.be.x) / (fog_params.be.y - fog_params.be.x)), fog_params.be.z);
+    let linear = saturate((distance - fog_params.be.x) / (fog_params.be.y - fog_params.be.x));
+    let extra = fog_params.bi.x * saturate((distance - fog_params.bi.y) * fog_params.bi.z);
+    return pow(saturate(linear + extra), fog_params.be.z);
 }
 
 fn linear_fog(

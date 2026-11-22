@@ -94,6 +94,7 @@ struct Fog {
     ///
     /// For Linear Fog:
     ///     be.x = start, be.y = end, be.z = power (1 for Linear, the power for Power)
+    ///     bi.x = the Power mode's extra share, bi.y its start, bi.z its ramp per unit (0 for Linear)
     /// For Exponential and ExponentialSquared Fog:
     ///     be.x = density
     /// For Atmospheric Fog:
