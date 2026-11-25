@@ -17,18 +17,43 @@ pub(crate) struct AudioOutput {
     stream: Option<MixerDeviceSink>,
 }
 
-impl Default for AudioOutput {
-    fn default() -> Self {
-        let stream = DeviceSinkBuilder::open_default_sink()
-            .inspect_err(|_err| {
-                warn!("No audio device found.");
-            })
-            .map(|mut s| {
-                s.log_on_drop(false);
-                s
-            })
-            .ok();
-        Self { stream }
+/// The output stream's channel count: with none, the device's own configuration; with a count, the stream is opened at that many
+/// channels, the platform mapping the usual speaker layout for the count onto the device's speakers, and opened again when the count
+/// changes to one the open stream does not have. The sounds playing on a stream stop when it is opened again.
+#[derive(Resource, Default, Clone, Copy, PartialEq, Eq, Debug)]
+pub struct AudioOutputChannels(pub Option<rodio::ChannelCount>);
+
+impl FromWorld for AudioOutput {
+    fn from_world(world: &mut World) -> Self {
+        let channels = world.get_resource::<AudioOutputChannels>().copied().unwrap_or_default();
+        Self { stream: open(channels) }
+    }
+}
+
+fn open(channels: AudioOutputChannels) -> Option<MixerDeviceSink> {
+    let opened = match channels.0 {
+        None => DeviceSinkBuilder::open_default_sink(),
+        Some(n) => DeviceSinkBuilder::from_default_device().and_then(|b| b.with_channels(n).open_stream()),
+    };
+    opened
+        .inspect_err(|_err| {
+            warn!("No audio device found.");
+        })
+        .map(|mut s| {
+            s.log_on_drop(false);
+            s
+        })
+        .ok()
+}
+
+/// The output stream opened again at a channel count it does not have.
+pub(crate) fn reopen_audio_output(channels: Res<AudioOutputChannels>, mut output: ResMut<AudioOutput>) {
+    if !channels.is_changed() {
+        return;
+    }
+    let now = output.stream.as_ref().map(|s| s.config().channel_count());
+    if channels.0.is_some() && now != channels.0 {
+        output.stream = open(*channels);
     }
 }
 

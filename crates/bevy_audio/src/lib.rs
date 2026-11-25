@@ -61,6 +61,7 @@ use bevy_ecs::prelude::*;
 use bevy_transform::TransformSystems;
 
 use audio_output::*;
+pub use audio_output::AudioOutputChannels;
 
 /// Set for the audio playback systems, so they can share a run condition
 #[derive(SystemSet, Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
@@ -92,7 +93,9 @@ impl Plugin for AudioPlugin {
                 PostUpdate,
                 (update_emitter_positions, update_listener_positions).in_set(AudioPlaybackSystems),
             )
-            .init_resource::<AudioOutput>();
+            .init_resource::<AudioOutputChannels>()
+            .init_resource::<AudioOutput>()
+            .add_systems(PostUpdate, reopen_audio_output.before(AudioPlaybackSystems));
 
         #[cfg(any(feature = "mp3", feature = "flac", feature = "wav", feature = "vorbis"))]
         {
