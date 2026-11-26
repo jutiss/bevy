@@ -7,7 +7,7 @@ use bevy_ecs::{prelude::*, system::SystemParam};
 use bevy_math::Vec3;
 use bevy_transform::prelude::GlobalTransform;
 use rodio::{DeviceSinkBuilder, MixerDeviceSink, Player, Source, SpatialPlayer};
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::{AudioSink, AudioSinkPlayback};
 
@@ -41,6 +41,7 @@ fn open(channels: AudioOutputChannels) -> Option<MixerDeviceSink> {
         })
         .map(|mut s| {
             s.log_on_drop(false);
+            info!("Audio output opened: {} channels at {} Hz.", s.config().channel_count(), s.config().sample_rate());
             s
         })
         .ok()
