@@ -148,7 +148,9 @@ impl Default for WgpuSettings {
             backends,
             power_preference,
             priority,
-            features: wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES,
+            // the main 3d depth target's format (core_3d CORE_3D_DEPTH_FORMAT), required, never left out
+            features: wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES
+                | wgpu::Features::DEPTH32FLOAT_STENCIL8,
             disabled_features: None,
             limits,
             constrained_limits: None,

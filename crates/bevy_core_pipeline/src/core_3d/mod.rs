@@ -2,7 +2,12 @@ mod main_opaque_pass_3d_node;
 mod main_transparent_pass_3d_node;
 
 // PERF: vulkan docs recommend using 24 bit depth for better performance
-pub const CORE_3D_DEPTH_FORMAT: TextureFormat = TextureFormat::Depth32Float;
+/// The main 3d depth target: 32-bit float depth and an 8-bit stencil the game's stencil marks use (ts3r).
+pub const CORE_3D_DEPTH_FORMAT: TextureFormat = TextureFormat::Depth32FloatStencil8;
+
+/// The stencil reference the main 3d passes set: every bit, so a pipeline's read and write masks pick the bits it tests or writes
+/// (ts3r: the game's marks each a single bit, its reference that bit).
+pub const CORE_3D_STENCIL_REFERENCE: u32 = 0xFF;
 
 /// True if multisampled depth textures are supported on this platform.
 ///
@@ -719,13 +724,15 @@ pub fn prepare_core_3d_depth_textures(
             })
             .clone();
 
+        // the stencil cleared to 0 wherever the depth is
+        let (depth_clear, stencil_clear) = match camera_3d.depth_load_op {
+            Camera3dDepthLoadOp::Clear(v) => (Some(v), Some(0)),
+            Camera3dDepthLoadOp::Load => (None, None),
+        };
         commands.entity(entity).insert(ViewDepthStencilTexture::new(
             cached_texture,
-            match camera_3d.depth_load_op {
-                Camera3dDepthLoadOp::Clear(v) => Some(v),
-                Camera3dDepthLoadOp::Load => None,
-            },
-            None,
+            depth_clear,
+            stencil_clear,
         ));
     }
 }

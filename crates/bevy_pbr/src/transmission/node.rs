@@ -85,6 +85,7 @@ pub fn main_transmissive_pass_3d(
                 let mut render_pass = ctx.begin_tracked_render_pass(render_pass_descriptor.clone());
                 let pass_span =
                     diagnostics.pass_span(&mut render_pass, "main_transmissive_pass_3d");
+                render_pass.set_stencil_reference(bevy_core_pipeline::core_3d::CORE_3D_STENCIL_REFERENCE);
 
                 if let Some(viewport) = camera.viewport.as_ref() {
                     render_pass.set_camera_viewport(viewport);
@@ -101,6 +102,7 @@ pub fn main_transmissive_pass_3d(
         } else {
             let mut render_pass = ctx.begin_tracked_render_pass(render_pass_descriptor);
             let pass_span = diagnostics.pass_span(&mut render_pass, "main_transmissive_pass_3d");
+            render_pass.set_stencil_reference(bevy_core_pipeline::core_3d::CORE_3D_STENCIL_REFERENCE);
 
             if let Some(viewport) =
                 Viewport::from_viewport_and_override(camera.viewport.as_ref(), resolution_override)

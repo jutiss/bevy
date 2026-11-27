@@ -73,6 +73,7 @@ pub fn main_opaque_pass_3d(
         multiview_mask: None,
     });
     let pass_span = diagnostics.pass_span(&mut render_pass, "main_opaque_pass_3d");
+    render_pass.set_stencil_reference(super::CORE_3D_STENCIL_REFERENCE);
 
     if let Some(viewport) =
         Viewport::from_viewport_and_override(camera.viewport.as_ref(), resolution_override)
