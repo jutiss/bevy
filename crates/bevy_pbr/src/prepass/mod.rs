@@ -675,7 +675,12 @@ impl PrepassPipeline {
                 ..default()
             },
             depth_stencil: Some(DepthStencilState {
-                format: CORE_3D_DEPTH_FORMAT,
+                // a shadow map's own format, the main view's prepass the main depth target's (ts3r)
+                format: if mesh_key.contains(MeshPipelineKey::SHADOW_MAP) {
+                    crate::CORE_3D_SHADOW_MAP_FORMAT
+                } else {
+                    CORE_3D_DEPTH_FORMAT
+                },
                 depth_write_enabled: Some(true),
                 depth_compare: Some(CompareFunction::GreaterEqual),
                 stencil: StencilState {

@@ -3128,7 +3128,8 @@ bitflags::bitflags! {
         const INVERT_CULLING                    = 1 << 22;
         const PREPASS_READS_MATERIAL            = 1 << 23;
         const CONTACT_SHADOWS                   = 1 << 24;
-        const LAST_FLAG                         = Self::CONTACT_SHADOWS.bits();
+        const SHADOW_MAP                        = 1 << 25; // A shadow map's draw: its depth target the shadow map format (ts3r)
+        const LAST_FLAG                         = Self::SHADOW_MAP.bits();
 
         const ALL_PREPASS_BITS                  = Self::DEPTH_PREPASS.bits()
                                                 | Self::NORMAL_PREPASS.bits()

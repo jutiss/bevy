@@ -2379,7 +2379,7 @@ pub fn check_views_lights_need_specialization(
         }
 
         let is_directional_light = matches!(light_entity, LightEntity::Directional { .. });
-        let mut light_key = MeshPipelineKey::DEPTH_PREPASS;
+        let mut light_key = MeshPipelineKey::DEPTH_PREPASS | MeshPipelineKey::SHADOW_MAP;
         light_key.set(
             MeshPipelineKey::VIEW_PROJECTION_ORTHOGRAPHIC | MeshPipelineKey::UNCLIPPED_DEPTH_ORTHO,
             is_directional_light,
