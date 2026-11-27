@@ -5,9 +5,9 @@ mod main_transparent_pass_3d_node;
 /// The main 3d depth target: 32-bit float depth and an 8-bit stencil the game's stencil marks use (ts3r).
 pub const CORE_3D_DEPTH_FORMAT: TextureFormat = TextureFormat::Depth32FloatStencil8;
 
-/// The stencil reference the main 3d passes set: every bit, so a pipeline's read and write masks pick the bits it tests or writes
-/// (ts3r: the game's marks each a single bit, its reference that bit).
-pub const CORE_3D_STENCIL_REFERENCE: u32 = 0xFF;
+/// The stencil reference the main 3d passes set (ts3r): the low six bits 0, the main view's mirror id, and bits 64 and 128, the game's
+/// two marks, so a pipeline's read and write masks pick the mark it writes or tests and its low six bits test the view.
+pub const CORE_3D_STENCIL_REFERENCE: u32 = 0xC0;
 
 /// True if multisampled depth textures are supported on this platform.
 ///
